@@ -58,26 +58,44 @@ Expected DUT log on receipt:
 [DMG] Building Reports for ReadHandler ...
 ```
 
-## Full campaign (Linux host)
+## Full campaign (Linux host) — validated 2026-06-19
 
 ```bash
-# Build AFLNet + Matter parser
-docker build -f matter/Dockerfile.aflnet -t aflnet-matter .   # from aflnet/ root
+# 1. Build AFLNet + Matter parser natively (no Docker; graphviz + libcap dev libs).
+#    llvm_mode / afl-clang-fast is NOT needed — see Instrumentation below.
+cd ..            # aflnet/ root
+make clean all
 
-# Build the DUT for Linux with matter_fuzz_afl_transport=true AND afl-clang-fast
-# instrumentation (CC/CXX wrappers), then:
-AFLNET=/aflnet DUT=/path/to/chip-all-clusters-app ./run_campaign.sh aflnet-out
+# 2. Build the instrumented DUT (from the EclipseFuzz repo root):
+gn gen out/afl-dut-cov --args='is_clang=true is_libfuzzer=false chip_build_all_clusters_app=true chip_crypto="mbedtls" chip_enable_ble=false chip_config_network_layer_ble=false chip_enable_wifi=false chip_enable_openthread=false matter_fuzz_afl_transport=true matter_fuzz_afl_instrument=true'
+ninja -C out/afl-dut-cov chip-all-clusters-app
+
+# 3. Generate seeds and run (PORT avoids a concurrent EP2 campaign on 5540):
+cd examples/fuzzers/aflnet/matter && python3 gen_matter_seeds.py -o seeds
+AFLNET=../.. DUT=../../../../out/afl-dut-cov/chip-all-clusters-app \
+  PORT=5560 ./run_campaign.sh /tmp/aflnet-out
 ```
+
+### Instrumentation (no afl-clang-fast)
+
+AFLNet's legacy `afl-clang-fast` LLVM pass no longer builds on modern LLVM, and
+the SDK is built with pigweed's own clang. So the DUT is instrumented with the
+SDK toolchain via `-fsanitize-coverage=trace-pc-guard`, whose callbacks are
+provided by AFLNet's `afl-llvm-rt.o.c` (built with `USE_TRACE_PC`). A **deferred
+forkserver** is started after init (before the event loop) so each fuzzing child
+inherits the already-bound socket instead of re-running `Server::Init()`. Full
+design: `ai_docs/benchmark-fuzzers.md` §Instrumentation & forkserver.
 
 ### Known Linux-host caveats
 
-- `llvm_mode` (afl-clang-fast) fails to build on modern LLVM (Ubuntu 22.04). Pin
-  LLVM 11/12 (`apt install llvm-12 clang-12`, `LLVM_CONFIG=llvm-config-12 make -C llvm_mode`),
-  matching ProfuzzBench's toolchain.
-- On Apple Silicon the AFLNet image needs `AFL_NO_X86=1` (set in the Dockerfile);
-  x86_64 campaign hosts don't.
-- The DUT is a macOS/arm64 binary in local dev — for the actual AFLNet loop the
-  DUT must be built for the same Linux host AFLNet runs on (co-located process).
+- The host's `core_pattern` pipes to an external handler and the CPU governor is
+  `powersave`; `run_campaign.sh` exports `AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES`,
+  `AFL_SKIP_CPUFREQ`, `AFL_NO_AFFINITY` to proceed without root.
+- The per-run `DELAY` settle (default 1 s) keeps `execs_per_sec ≈ 1`. Sweep it
+  down toward the minimum reliable value to raise throughput (too small ⇒ AFLNet
+  aborts with "No server states detected").
+- `AFL_KEEP_CHILD_STDERR=1` (added to `afl-fuzz.c`) keeps the DUT child's output
+  instead of `/dev/null` — useful for debugging the forkserver.
 
 ## Seed / packet format
 
