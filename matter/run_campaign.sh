@@ -38,9 +38,12 @@ KVS="${KVS:-/tmp/afl-matter-kvs}"
 PORT="${PORT:-5560}"
 # Settle time (usecs) between forking a run's DUT child and sending the request.
 # The deferred child resumes straight at the event loop, but still needs to reach
-# epoll_wait on the inherited socket before the datagram arrives; too small and
-# AFLNet sees an empty response and aborts ("No server states detected").
-DELAY="${DELAY:-1000000}"
+# epoll_wait on the inherited socket before the datagram arrives (AFLNet only
+# polls ~1ms for the response after sending). Too small ⇒ AFLNet sees an empty
+# response and aborts ("No server states detected"). Measured floor on this DUT
+# is ~20ms; 50ms is a safe margin (~18 exec/s). 10ms fails. Raise it on a slower
+# / more heavily loaded host.
+DELAY="${DELAY:-50000}"
 
 [ -d "$SEEDS" ] || { echo "seed dir '$SEEDS' missing — run gen_matter_seeds.py first"; exit 1; }
 rm -f "$KVS"
