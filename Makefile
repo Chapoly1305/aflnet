@@ -44,6 +44,20 @@ endif
 
 COMM_HDR    = alloc-inl.h config.h debug.h types.h
 
+# ChatAFL-for-Matter: LLM-guided grammar/enrichment/stall layer.
+# Build with `make CHATAFL=1` to compile afl-fuzz with the LLM layer linked in
+# (requires libcurl + json-c dev packages). Without it, afl-fuzz builds as the
+# plain AFLNet baseline, byte-for-byte unchanged. See ai_docs/benchmark-fuzzers.md.
+ifeq "$(CHATAFL)" "1"
+  CHATAFL_OBJS   = chat-llm-tlv.o chat-llm.o
+  CHATAFL_CFLAGS = -DCHATAFL -D_GNU_SOURCE
+  CHATAFL_LDLIBS = -lcurl -ljson-c
+else
+  CHATAFL_OBJS   =
+  CHATAFL_CFLAGS =
+  CHATAFL_LDLIBS =
+endif
+
 all: test_x86 $(PROGS) afl-as test_build all_done
 
 ifndef AFL_NO_X86
@@ -69,8 +83,21 @@ afl-as: afl-as.c afl-as.h $(COMM_HDR) | test_x86
 	$(CC) $(CFLAGS) $@.c -o $@ $(LDFLAGS)
 	ln -sf afl-as as
 
-afl-fuzz: afl-fuzz.c $(COMM_HDR) aflnet.o aflnet.h | test_x86
-	$(CC) $(CFLAGS) $@.c aflnet.o -o $@ $(LDFLAGS)
+# Unit-test the ChatAFL-for-Matter TLV + catalog core. Needs no curl/json-c.
+.PHONY: test-chatafl
+test-chatafl:
+	$(CC) -Wall -Wextra -I. -o .chatafl_tlv_test matter/test_chatafl_tlv.c chat-llm-tlv.c
+	./.chatafl_tlv_test
+	@rm -f .chatafl_tlv_test
+
+chat-llm-tlv.o: chat-llm-tlv.c chat-llm-tlv.h chat-llm.h
+	$(CC) $(CFLAGS) $(CHATAFL_CFLAGS) -c chat-llm-tlv.c -o $@
+
+chat-llm.o: chat-llm.c chat-llm.h chat-llm-tlv.h
+	$(CC) $(CFLAGS) $(CHATAFL_CFLAGS) -c chat-llm.c -o $@
+
+afl-fuzz: afl-fuzz.c $(COMM_HDR) aflnet.o aflnet.h $(CHATAFL_OBJS) | test_x86
+	$(CC) $(CFLAGS) $(CHATAFL_CFLAGS) $@.c aflnet.o $(CHATAFL_OBJS) -o $@ $(LDFLAGS) $(CHATAFL_LDLIBS)
 
 afl-replay: afl-replay.c $(COMM_HDR) aflnet.o aflnet.h | test_x86
 	$(CC) $(CFLAGS) $@.c aflnet.o -o $@ $(LDFLAGS)

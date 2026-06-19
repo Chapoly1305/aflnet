@@ -16,6 +16,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential clang llvm llvm-dev \
         graphviz-dev libcap-dev \
+        libcurl4-openssl-dev libjson-c-dev \
         ca-certificates make \
     && rm -rf /var/lib/apt/lists/*
 
@@ -29,6 +30,16 @@ COPY . /aflnet
 # campaign host this env var is unnecessary.
 ENV AFL_NO_X86=1
 RUN make clean all
+
+# Also build the ChatAFL-for-Matter LLM-guided variant (afl-fuzz with -DCHATAFL,
+# linking libcurl + json-c). Kept as a separate binary so both the plain AFLNet
+# baseline and the ChatAFL baseline come from one tree. Enable LLM calls at run
+# time with CHATAFL=1 CHATAFL_LLM=1 CHATAFL_OPENAI_KEY=sk-...; without a key it
+# runs catalog-only enrichment offline.
+RUN cp afl-fuzz afl-fuzz-aflnet \
+    && make CHATAFL=1 afl-fuzz \
+    && cp afl-fuzz afl-fuzz-chatafl \
+    && cp afl-fuzz-aflnet afl-fuzz
 
 # llvm_mode provides afl-clang-fast for instrumenting the DUT.
 RUN make -C llvm_mode || echo "llvm_mode build skipped (set LLVM_CONFIG if needed)"

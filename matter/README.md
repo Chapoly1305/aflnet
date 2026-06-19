@@ -1,8 +1,14 @@
 # AFLNet ↔ Matter integration
 
-Benchmark integration of [AFLNet](https://github.com/aflnet/aflnet) against the
-`all-clusters-app` Matter DUT. See `ai_docs/benchmark-fuzzers.md` for the full
-design and rationale.
+Benchmark integration of [AFLNet](https://github.com/aflnet/aflnet) **and
+[ChatAFL](https://github.com/ChatAFLndss/ChatAFL)** against the `all-clusters-app`
+Matter DUT. See `ai_docs/benchmark-fuzzers.md` for the full design and rationale.
+
+Both baselines come from this one tree: `make clean all` builds the plain AFLNet
+`afl-fuzz`; `make CHATAFL=1 afl-fuzz` builds the ChatAFL-for-Matter LLM-guided
+variant (everything behind `#ifdef CHATAFL`). They share the `-P MATTER` parser,
+the `MATTER_FUZZ_AFL_TRANSPORT` DUT, and the coverage-over-time eval — so the
+EclipseFuzz-vs-AFLNet-vs-ChatAFL comparison isolates exactly the LLM layer.
 
 ## Contents
 
@@ -11,9 +17,25 @@ design and rationale.
 | `gen_matter_seeds.py` | Generate raw plaintext Matter request datagrams (AFLNet seeds) |
 | `udp_smoke_test.py` | Send one seed to a running DUT and print/parse the response |
 | `test_matter_parser.c` | Standalone unit test for `extract_*_matter` (any platform) |
-| `Dockerfile.aflnet` | Build AFLNet (+ Matter parser) on Linux |
-| `run_campaign.sh` | Drive an AFLNet campaign against the instrumented DUT |
+| `test_chatafl_tlv.c` | Standalone unit test for the ChatAFL TLV walker + catalog (`make test-chatafl`) |
+| `Dockerfile.aflnet` | Build AFLNet + ChatAFL (+ Matter parser) on Linux |
+| `run_campaign.sh` | Drive a campaign; `FUZZER=aflnet\|chatafl` |
 | `seeds/` | Generated seed corpus |
+
+The ChatAFL LLM layer lives one dir up: `../chat-llm-tlv.{c,h}` (dependency-free
+TLV walker + message catalog/encoder) and `../chat-llm.{c,h}` (libcurl/json-c
+transport + grammar/enrichment/stall prompts).
+
+## ChatAFL-for-Matter in one paragraph
+
+ChatAFL is text-protocol machinery (RTSP `<<VALUE>>` templates + PCRE2). Matter is
+binary TLV, so the LLM layer was rewritten TLV-aware: the LLM operates at the
+message-type level (catalog augmentation, enrichment, stall) while mutable spans
+are found deterministically by walking the TLV (`matter_get_mutable_ranges` →
+value bytes only, never headers/MIC). Enable LLM calls with `CHATAFL=1
+CHATAFL_LLM=1 CHATAFL_OPENAI_KEY=sk-…`; with no key it runs catalog-only, offline.
+The layer is firewalled from EclipseFuzz internals (FSM catalogs, oracles) to stay
+an independent baseline.
 
 ## How the pieces fit
 

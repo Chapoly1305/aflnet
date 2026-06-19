@@ -72,6 +72,21 @@
 #include <graphviz/gvc.h>
 #include <math.h>
 
+#ifdef CHATAFL
+/* ChatAFL-for-Matter: LLM-guided grammar/enrichment/stall layer. All ChatAFL
+   code in this file is gated behind -DCHATAFL so the same tree still builds the
+   plain AFLNet baseline binary unchanged. See chat-llm.h / ai_docs/benchmark-
+   fuzzers.md. */
+#include "chat-llm.h"
+#define CHATAFL_EXPLORE_PCT 50    /* % of havoc fuzz_one runs that explore freely */
+#define CHATAFL_STALL_MS    60000 /* ms with no new path before requesting a msg   */
+#define CHATAFL_STALL_CAP   64    /* max stall/LLM seed injections per campaign     */
+static matter_catalog_t *chatafl_cat = NULL;
+static u8  chatafl_enabled = 0;
+static u64 chatafl_last_stall = 0;
+static u32 chatafl_stalls = 0;
+#endif
+
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined (__OpenBSD__)
 #  include <sys/sysctl.h>
 #endif /* __APPLE__ || __FreeBSD__ || __OpenBSD__ */
@@ -5840,6 +5855,53 @@ static u8 fuzz_one(char** argv) {
   u8  a_collect[MAX_AUTO_EXTRA];
   u32 a_len = 0;
 
+#ifdef CHATAFL
+  /* ChatAFL stall response: if no new path for a while, ask the LLM (or the
+     catalog, offline) for the next Matter message to append, encode it, and
+     enqueue the resulting seed. Bounded by CHATAFL_STALL_CAP per campaign. */
+  if (chatafl_enabled && chatafl_cat && matter_catalog_size(chatafl_cat) > 0 &&
+      queue_cur && queue_cur->fname) {
+    u64 now = get_cur_time();
+    if (now - last_path_time > CHATAFL_STALL_MS &&
+        now - chatafl_last_stall > CHATAFL_STALL_MS &&
+        chatafl_stalls < CHATAFL_STALL_CAP) {
+      chatafl_last_stall = now;
+      chatafl_stalls++;
+      FILE *sf = fopen((char *)queue_cur->fname, "rb");
+      if (sf) {
+        fseek(sf, 0, SEEK_END);
+        long sl = ftell(sf);
+        fseek(sf, 0, SEEK_SET);
+        if (sl > 0) {
+          u8 *sb = ck_alloc(sl);
+          if (fread(sb, 1, sl, sf) == (size_t)sl) {
+            unsigned char *nb = NULL;
+            unsigned int nl = 0;
+            if (matter_llm_next_seed(chatafl_cat, sb, (unsigned)sl, &nb, &nl)) {
+              u8 *fn = alloc_printf("%s/queue/chatafl_stall_%u", out_dir,
+                                    chatafl_stalls);
+              s32 sfd = open((char *)fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
+              if (sfd >= 0) {
+                ck_write(sfd, nb, nl, fn);
+                close(sfd);
+                u8 prev = corpus_read_or_sync;
+                corpus_read_or_sync = 1; /* make add_to_queue parse regions */
+                add_to_queue(fn, nl, 0); /* keeps fn; do not free */
+                corpus_read_or_sync = prev;
+              } else {
+                ck_free(fn);
+              }
+              free(nb);
+            }
+          }
+          ck_free(sb);
+        }
+        fclose(sf);
+      }
+    }
+  }
+#endif
+
 #ifdef IGNORE_FINDS
 
   /* In IGNORE_FINDS mode, skip any entries that weren't in the
@@ -7017,6 +7079,30 @@ havoc_stage:
 
   havoc_queued = queued_paths;
 
+#ifdef CHATAFL
+  /* Grammar-guided exploit: for this fuzz_one, with probability
+     (1 - CHATAFL_EXPLORE_PCT%) confine havoc to TLV value-byte spans so the
+     message stays structurally valid (in-place mutation, no reframing). The
+     ranges are computed once on the original buffer; AFLNet restores out_buf
+     from in_buf each stage_cur iteration (unchanged length in exploit mode), so
+     the offsets stay valid for every iteration. */
+  u8 chatafl_exploit = 0;
+  mrange_t *chatafl_ranges = NULL;
+  u32 chatafl_nranges = 0;
+  if (chatafl_enabled) {
+    chatafl_exploit = (UR(100) >= CHATAFL_EXPLORE_PCT);
+    if (chatafl_exploit) {
+      chatafl_ranges =
+          matter_get_mutable_ranges(out_buf, (unsigned)temp_len, &chatafl_nranges);
+      if (chatafl_nranges == 0) {
+        chatafl_exploit = 0;
+        free(chatafl_ranges);
+        chatafl_ranges = NULL;
+      }
+    }
+  }
+#endif
+
   /* We essentially just do several thousand runs (depending on perf_score)
      where we take the input file and make random stacked tweaks. */
 
@@ -7027,6 +7113,23 @@ havoc_stage:
     stage_cur_val = use_stacking;
 
     for (i = 0; i < use_stacking; i++) {
+
+#ifdef CHATAFL
+      if (chatafl_exploit && chatafl_nranges > 0) {
+        /* Mutate within one TLV value span only (in place). */
+        mrange_t *rg = &chatafl_ranges[UR(chatafl_nranges)];
+        if (rg->len > 0) {
+          u32 p = (u32)rg->start + UR((u32)rg->len);
+          switch (UR(4)) {
+            case 0:  out_buf[p] ^= 1 + UR(255); break;
+            case 1:  out_buf[p]  = interesting_8[UR(sizeof(interesting_8))]; break;
+            case 2:  out_buf[p] += 1 + UR(ARITH_MAX); break;
+            default: out_buf[p] -= 1 + UR(ARITH_MAX); break;
+          }
+        }
+        continue; /* skip the default byte-level havoc switch */
+      }
+#endif
 
       switch (UR(15 + 2 + (region_level_mutation ? 4 : 0))) {
 
@@ -7505,6 +7608,10 @@ havoc_stage:
     }
 
   }
+
+#ifdef CHATAFL
+  if (chatafl_ranges) { free(chatafl_ranges); chatafl_ranges = NULL; }
+#endif
 
   new_hit_cnt = queued_paths + unique_crashes;
 
@@ -9243,6 +9350,30 @@ int main(int argc, char** argv) {
   init_message_code_map();
 
   setup_dirs_fds();
+
+#ifdef CHATAFL
+  /* Build the message-type catalog from the seed corpus, optionally augment it
+     via the LLM, and write enriched seeds into in_dir BEFORE read_testcases()
+     so they are loaded as initial seeds. Enable with env CHATAFL=1. */
+  if (getenv("CHATAFL") && !strcmp(getenv("CHATAFL"), "1")) {
+    chatafl_enabled = 1;
+    ACTF("ChatAFL-Matter: building message-type catalog from '%s'...", in_dir);
+    chatafl_cat = matter_catalog_build(in_dir);
+    OKF("ChatAFL-Matter: %u message types from corpus.",
+        matter_catalog_size(chatafl_cat));
+    if (matter_llm_enabled()) {
+      int added = matter_catalog_llm_augment(chatafl_cat);
+      OKF("ChatAFL-Matter: LLM added %d message types (total %u).", added,
+          matter_catalog_size(chatafl_cat));
+    } else {
+      WARNF("ChatAFL-Matter: LLM disabled (set CHATAFL_LLM=1 + CHATAFL_OPENAI_KEY); "
+            "running catalog-only enrichment.");
+    }
+    int enr = matter_catalog_write_enriched(chatafl_cat, in_dir);
+    OKF("ChatAFL-Matter: wrote %d enriched seeds into the corpus.", enr);
+  }
+#endif
+
   read_testcases();
   load_auto();
 

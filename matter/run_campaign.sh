@@ -28,6 +28,10 @@
 #   PORT=5560   operational UDP port (must avoid a concurrent EP2 run on 5540)
 #   SEEDS=seeds seed corpus dir
 #   KVS=...     DUT key-value store path (wiped each start)
+#   FUZZER=aflnet|chatafl   which baseline to run (default aflnet)
+#                           chatafl uses the -DCHATAFL binary + the LLM layer
+#   CHATAFL_LLM=1           (chatafl only) enable LLM calls; needs CHATAFL_OPENAI_KEY
+#   CHATAFL_OPENAI_KEY=sk-… (chatafl only) OpenAI key; absent ⇒ catalog-only, offline
 set -euo pipefail
 
 AFLNET="${AFLNET:?set AFLNET to the aflnet checkout}"
@@ -48,6 +52,31 @@ DELAY="${DELAY:-50000}"
 [ -d "$SEEDS" ] || { echo "seed dir '$SEEDS' missing — run gen_matter_seeds.py first"; exit 1; }
 rm -f "$KVS"
 
+# Select the fuzzer binary. The ChatAFL variant is built with `make CHATAFL=1`
+# (Dockerfile installs it as afl-fuzz-chatafl); fall back to afl-fuzz if a single
+# CHATAFL-enabled binary was built in place. CHATAFL=1 turns the LLM layer on at
+# run time; the binary still runs as plain AFLNet when CHATAFL is unset.
+FUZZER="${FUZZER:-aflnet}"
+case "$FUZZER" in
+  aflnet)
+    AFL_BIN="$AFLNET/afl-fuzz"
+    [ -x "$AFLNET/afl-fuzz-aflnet" ] && AFL_BIN="$AFLNET/afl-fuzz-aflnet"
+    ;;
+  chatafl)
+    AFL_BIN="$AFLNET/afl-fuzz-chatafl"
+    [ -x "$AFL_BIN" ] || AFL_BIN="$AFLNET/afl-fuzz"
+    export CHATAFL=1
+    export CHATAFL_LLM="${CHATAFL_LLM:-0}"
+    if [ "$CHATAFL_LLM" = "1" ] && [ -z "${CHATAFL_OPENAI_KEY:-}${OPENAI_API_KEY:-}" ]; then
+      echo "FUZZER=chatafl CHATAFL_LLM=1 but no CHATAFL_OPENAI_KEY/OPENAI_API_KEY set;"
+      echo "the run will proceed catalog-only (offline)."
+    fi
+    ;;
+  *)
+    echo "unknown FUZZER='$FUZZER' (expected aflnet|chatafl)"; exit 1 ;;
+esac
+[ -x "$AFL_BIN" ] || { echo "fuzzer binary '$AFL_BIN' not found/executable"; exit 1; }
+
 # AFL host-environment bypasses (the campaign host's core_pattern pipes to an
 # external handler and the CPU governor is 'powersave'; neither is fatal here).
 export AFL_SKIP_CPUFREQ="${AFL_SKIP_CPUFREQ:-1}"
@@ -65,7 +94,7 @@ export AFL_NO_AFFINITY="${AFL_NO_AFFINITY:-1}"
 #   -q 3 -s 3                 state/seed selection algorithms (AFLNet stateful defaults)
 #   -m none                   no memory limit (large DUT)
 #   -t 2000+                  per-run timeout, skip-timeout mode
-exec "$AFLNET/afl-fuzz" \
+exec "$AFL_BIN" \
   -d \
   -i "$SEEDS" -o "$OUT" \
   -N "udp://127.0.0.1/$PORT" \
