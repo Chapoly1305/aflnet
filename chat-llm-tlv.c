@@ -3,6 +3,10 @@
    No libcurl / json-c here. See chat-llm-tlv.h.
 */
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE /* asprintf */
+#endif
+
 #include "chat-llm-tlv.h"
 
 #include <stdio.h>
@@ -402,10 +406,11 @@ matter_catalog_t *matter_catalog_build(const char *seed_dir) {
   while ((de = readdir(d))) {
     if (de->d_name[0] == '.') continue;
     if (strncmp(de->d_name, "enriched_", 9) == 0) continue; /* avoid feedback */
-    char path[2048];
-    snprintf(path, sizeof(path), "%s/%s", seed_dir, de->d_name);
+    char *path = NULL;
+    if (asprintf(&path, "%s/%s", seed_dir, de->d_name) < 0) continue;
     unsigned int len = 0;
     unsigned char *b = read_file(path, &len);
+    free(path);
     if (!b) continue;
     catalog_ingest(cat, b, len);
     free(b);
@@ -496,10 +501,11 @@ int matter_catalog_write_enriched(matter_catalog_t *cat, const char *seed_dir) {
   closedir(d);
 
   for (int s = 0; s < nnames; s++) {
-    char path[2048];
-    snprintf(path, sizeof(path), "%s/%s", seed_dir, names[s]);
+    char *path = NULL;
+    if (asprintf(&path, "%s/%s", seed_dir, names[s]) < 0) continue;
     unsigned int len = 0;
     unsigned char *b = read_file(path, &len);
+    free(path);
     if (!b) continue;
 
     unsigned int appended = 0;
@@ -514,9 +520,12 @@ int matter_catalog_write_enriched(matter_catalog_t *cat, const char *seed_dir) {
       appended++;
     }
     if (appended > 0) {
-      char outp[2200];
-      snprintf(outp, sizeof(outp), "%s/enriched_%d_%s", seed_dir, s, names[s]);
+      char *outp = NULL;
+      if (asprintf(&outp, "%s/enriched_%d_%s", seed_dir, s, names[s]) < 0) {
+        free(acc); free(b); continue;
+      }
       FILE *f = fopen(outp, "wb");
+      free(outp);
       if (f) {
         fwrite(acc, 1, acc_len, f);
         fclose(f);
