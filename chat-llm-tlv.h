@@ -43,12 +43,8 @@ long tlv_collect_ranges(const unsigned char *buf, unsigned int off,
                         unsigned int size, mrange_t **out, unsigned int *count,
                         unsigned int *cap);
 
-/* Find first context-tag uint8 (control 0x24) with tag==want at/after off and
-   before end. Returns value or -1; reports value byte offset via *val_off. */
-int tlv_find_ctx_u8(const unsigned char *buf, unsigned int off, unsigned int end,
-                    unsigned char want_tag, int *val_off);
-
-/* Decode an entry's identity (opcode/endpoint/cluster/target/key) from bytes. */
+/* Decode an entry's identity (opcode/endpoint/cluster/target/key) from bytes.
+   Handles context-tagged uint8/16/32/64 ids (e.g. cluster 0x0300 = two bytes). */
 void entry_decode(catalog_entry_t *e);
 
 /* Catalog helpers used by both TUs. */

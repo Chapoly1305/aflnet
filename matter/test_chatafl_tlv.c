@@ -125,10 +125,88 @@ static void test_catalog(void) {
   if (system(cmd)) { /* ignore */ }
 }
 
+/* Same read as READ_ONOFF but cluster encoded as uint16 (0x25) = 0x0300 (768),
+   one byte longer. Exercises width-aware decode. */
+static const unsigned char READ_C16[] = {
+    0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x05, 0x02, 0x03, 0x00, 0x01, 0x00,
+    0x15, 0x36, 0x00, 0x17, 0x24, 0x02, 0x01,
+    0x25, 0x03, 0x00, 0x03,             /* cluster = uint16 0x0300 = 768 */
+    0x24, 0x04, 0x00, 0x18, 0x18, 0x28, 0x03, 0x24, 0xff, 0x0c, 0x18,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+
+static void test_wide_ids(void) {
+  printf("[width-aware decode — uint16 cluster]\n");
+  char dir[] = "/tmp/chatafl_w_test_XXXXXX";
+  assert(mkdtemp(dir));
+  char seed[512];
+  snprintf(seed, sizeof(seed), "%s/read_c16.raw", dir);
+  FILE *f = fopen(seed, "wb");
+  fwrite(READ_C16, 1, sizeof(READ_C16), f);
+  fclose(f);
+  matter_catalog_t *cat = matter_catalog_build(dir);
+  CHECK(matter_catalog_size(cat) == 1, "one type from uint16 seed");
+  if (cat->count == 1) {
+    CHECK(cat->entries[0].cluster_id == 768, "uint16 cluster decoded as 768 (not truncated)");
+    CHECK(cat->entries[0].endpoint == 1, "endpoint still 1");
+    CHECK(cat->entries[0].target_id == 0, "attr still 0");
+  }
+  /* every value range must still lie in the TLV body */
+  unsigned int n = 0;
+  mrange_t *r = matter_get_mutable_ranges(READ_C16, sizeof(READ_C16), &n);
+  CHECK(n == 4, "uint16 seed still yields 4 value ranges");
+  free(r);
+  matter_catalog_free(cat);
+  char cmd[600]; snprintf(cmd, sizeof(cmd), "rm -rf %s", dir);
+  if (system(cmd)) {}
+
+  printf("[clone widening — uint8 cluster -> uint16/uint32]\n");
+  /* Build a uint8-cluster catalog entry, then clone to a >255 cluster. */
+  matter_catalog_t base = {0};
+  catalog_entry_t seed_e; memset(&seed_e, 0, sizeof(seed_e));
+  seed_e.bytes = malloc(sizeof(READ_ONOFF));
+  memcpy(seed_e.bytes, READ_ONOFF, sizeof(READ_ONOFF));
+  seed_e.len = sizeof(READ_ONOFF);
+  entry_decode(&seed_e);
+  catalog_add_unique(&base, seed_e);
+
+  /* fits in uint8: in-place, no growth */
+  catalog_entry_t c8 = catalog_clone_with_ids(&base.entries[0], 1, 8, 0);
+  CHECK(c8.cluster_id == 8, "clone to cluster 8 decodes as 8");
+  CHECK(c8.len == sizeof(READ_ONOFF), "uint8-fit clone keeps length");
+  free(c8.bytes);
+
+  /* needs uint16: widen by 1 byte */
+  catalog_entry_t c16 = catalog_clone_with_ids(&base.entries[0], 1, 0x0300, 0);
+  CHECK(c16.cluster_id == 768, "clone to cluster 768 decodes as 768");
+  CHECK(c16.len == sizeof(READ_ONOFF) + 1, "uint16 clone grew by 1 byte");
+  unsigned int wn = 0;
+  mrange_t *wr = matter_get_mutable_ranges(c16.bytes, c16.len, &wn);
+  CHECK(wn == 4, "widened clone re-parses to 4 value ranges (valid TLV)");
+  free(wr);
+  free(c16.bytes);
+
+  /* needs uint32: widen by 3 bytes */
+  catalog_entry_t c32 = catalog_clone_with_ids(&base.entries[0], 1, 0x10000, 0);
+  CHECK(c32.cluster_id == 0x10000, "clone to cluster 0x10000 decodes correctly");
+  CHECK(c32.len == sizeof(READ_ONOFF) + 3, "uint32 clone grew by 3 bytes");
+  unsigned int wn2 = 0;
+  mrange_t *wr2 = matter_get_mutable_ranges(c32.bytes, c32.len, &wn2);
+  CHECK(wn2 == 4, "uint32 clone still valid TLV (4 ranges)");
+  free(wr2);
+  free(c32.bytes);
+
+  /* `base` is a stack catalog — free its members directly (matter_catalog_free
+     also free()s the catalog struct, which is only valid for heap catalogs). */
+  free(base.entries[0].bytes);
+  free(base.entries);
+}
+
 int main(void) {
   test_ranges();
   test_garbage();
   test_catalog();
+  test_wide_ids();
   printf("\n%s (%d failure%s)\n", failures ? "TESTS FAILED" : "ALL TESTS PASSED",
          failures, failures == 1 ? "" : "s");
   return failures ? 1 : 0;

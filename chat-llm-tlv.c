@@ -151,18 +151,142 @@ mrange_t *matter_get_mutable_ranges(const unsigned char *buf, unsigned int len,
  *  Catalog                                                               *
  * ===================================================================== */
 
-int tlv_find_ctx_u8(const unsigned char *buf, unsigned int off, unsigned int end,
-                    unsigned char want_tag, int *val_off) {
+/* Structural TLV walk: find the first context-tagged unsigned-int element whose
+   single tag byte == want_tag in [off,end), descending into containers. Unlike a
+   byte-scan this is exact (no false matches on value bytes) and handles any
+   integer width — Matter cluster/attribute/endpoint ids can be uint8/16/32, e.g.
+   ColorControl=0x0300 needs two value bytes. On success returns 1 and reports the
+   control-byte offset, value offset, value width (bytes) and decoded value. */
+static int find_ctx_uint(const unsigned char *buf, unsigned int off,
+                         unsigned int end, unsigned char want_tag,
+                         unsigned int *ctrl_off, unsigned int *val_off,
+                         unsigned int *width, unsigned long long *value) {
   unsigned int i = off;
-  while (i + 3 <= end) {
-    if (buf[i] == 0x24 /* ctx tag, uint8 */ && buf[i + 1] == want_tag) {
-      if (val_off) *val_off = (int)(i + 2);
-      return buf[i + 2];
+  int depth = 0;
+  while (i < end) {
+    unsigned int ctrl_at = i;
+    unsigned char ctrl = buf[i++];
+    unsigned char elem_type = ctrl & 0x1F;
+
+    if (elem_type == 0x18) { /* EndOfContainer */
+      if (depth == 0) break;
+      depth--;
+      continue;
     }
-    i++;
+
+    unsigned int tag_len;
+    switch (ctrl & 0xE0) {
+      case 0x00: tag_len = 0; break;
+      case 0x20: tag_len = 1; break;
+      case 0x40: tag_len = 2; break;
+      case 0x60: tag_len = 4; break;
+      case 0x80: tag_len = 2; break;
+      case 0xA0: tag_len = 4; break;
+      case 0xC0: tag_len = 6; break;
+      case 0xE0: tag_len = 8; break;
+      default: return 0;
+    }
+    unsigned char tag0 = (tag_len >= 1 && i < end) ? buf[i] : 0xff;
+    i += tag_len;
+    if (i > end) return 0;
+
+    if (elem_type <= 0x07) {
+      unsigned int vlen = 1u << (elem_type & 0x03);
+      if (i + vlen > end) return 0;
+      /* unsigned int = 0x04..0x07, context tag = (ctrl & 0xE0) == 0x20 */
+      if ((ctrl & 0xE0) == 0x20 && elem_type >= 0x04 && elem_type <= 0x07 &&
+          tag0 == want_tag) {
+        unsigned long long v = 0;
+        for (unsigned int k = 0; k < vlen; k++)
+          v |= (unsigned long long)buf[i + k] << (8 * k);
+        if (ctrl_off) *ctrl_off = ctrl_at;
+        if (val_off) *val_off = i;
+        if (width) *width = vlen;
+        if (value) *value = v;
+        return 1;
+      }
+      i += vlen;
+    } else if (elem_type == 0x08 || elem_type == 0x09) {
+      /* boolean: no value bytes */
+    } else if (elem_type == 0x0A) {
+      if (i + 4 > end) return 0;
+      i += 4;
+    } else if (elem_type == 0x0B) {
+      if (i + 8 > end) return 0;
+      i += 8;
+    } else if (elem_type >= 0x0C && elem_type <= 0x13) {
+      unsigned int lf = 1u << ((elem_type - 0x0C) & 0x03);
+      if (i + lf > end) return 0;
+      unsigned long long sl = 0;
+      for (unsigned int k = 0; k < lf; k++)
+        sl |= (unsigned long long)buf[i + k] << (8 * k);
+      i += lf;
+      if (i + (unsigned int)sl > end) return 0;
+      i += (unsigned int)sl;
+    } else if (elem_type == 0x14) {
+      /* null */
+    } else if (elem_type >= 0x15 && elem_type <= 0x17) {
+      depth++;
+    } else {
+      return 0;
+    }
   }
-  if (val_off) *val_off = -1;
-  return -1;
+  return 0;
+}
+
+/* Set the context-tagged uint with tag `want_tag` to `value`, in place when the
+   value fits the field's current width, otherwise widening the element (Matter
+   TLV containers are delimiter-terminated and the headers carry no TLV length,
+   so splicing extra value bytes never breaks framing). e->bytes may be realloc'd
+   and e->len grown. */
+static void set_ctx_uint(catalog_entry_t *e, unsigned char want_tag,
+                         unsigned long long value) {
+  int mh = mm_msg_header_len(e->bytes, 0, e->len);
+  if (mh < 0) return;
+  int ph = mm_payload_header_len(e->bytes, (unsigned int)mh, e->len);
+  if (ph < 0) return;
+  unsigned int tlv_off = (unsigned int)mh + (unsigned int)ph;
+  unsigned int tlv_end =
+      e->len > MATTER_MIC_LEN ? e->len - MATTER_MIC_LEN : e->len;
+
+  unsigned int ctrl_off, val_off, width;
+  unsigned long long cur;
+  if (!find_ctx_uint(e->bytes, tlv_off, tlv_end, want_tag, &ctrl_off, &val_off,
+                     &width, &cur))
+    return;
+
+  unsigned int need = value <= 0xFFULL          ? 1
+                      : value <= 0xFFFFULL       ? 2
+                      : value <= 0xFFFFFFFFULL   ? 4
+                                                 : 8;
+  if (need <= width) {
+    /* fits — write little-endian at the existing (possibly non-minimal) width */
+    unsigned long long v = value;
+    for (unsigned int k = 0; k < width; k++) {
+      e->bytes[val_off + k] = (unsigned char)(v & 0xff);
+      v >>= 8;
+    }
+    return;
+  }
+
+  /* widen: change the element type and splice (need - width) extra value bytes */
+  unsigned int grow = need - width;
+  unsigned char type_idx = need == 1 ? 0 : need == 2 ? 1 : need == 4 ? 2 : 3;
+  unsigned char new_ctrl =
+      (unsigned char)((e->bytes[ctrl_off] & 0xE0) | (0x04 + type_idx));
+  unsigned char *nb = malloc(e->len + grow);
+  memcpy(nb, e->bytes, val_off); /* headers, tag, control (overwritten below) */
+  nb[ctrl_off] = new_ctrl;
+  unsigned long long v = value;
+  for (unsigned int k = 0; k < need; k++) {
+    nb[val_off + k] = (unsigned char)(v & 0xff);
+    v >>= 8;
+  }
+  memcpy(nb + val_off + need, e->bytes + val_off + width,
+         e->len - (val_off + width)); /* tail incl. trailing MIC */
+  free(e->bytes);
+  e->bytes = nb;
+  e->len += grow;
 }
 
 void entry_decode(catalog_entry_t *e) {
@@ -176,9 +300,14 @@ void entry_decode(catalog_entry_t *e) {
   unsigned int tlv_off = (unsigned int)mh + (unsigned int)ph;
   unsigned int tlv_end =
       e->len > MATTER_MIC_LEN ? e->len - MATTER_MIC_LEN : e->len;
-  e->endpoint = tlv_find_ctx_u8(e->bytes, tlv_off, tlv_end, 0x02, NULL);
-  e->cluster_id = tlv_find_ctx_u8(e->bytes, tlv_off, tlv_end, 0x03, NULL);
-  e->target_id = tlv_find_ctx_u8(e->bytes, tlv_off, tlv_end, 0x04, NULL);
+  unsigned int co, vo, w;
+  unsigned long long v;
+  if (find_ctx_uint(e->bytes, tlv_off, tlv_end, 0x02, &co, &vo, &w, &v))
+    e->endpoint = (int)v;
+  if (find_ctx_uint(e->bytes, tlv_off, tlv_end, 0x03, &co, &vo, &w, &v))
+    e->cluster_id = (int)v;
+  if (find_ctx_uint(e->bytes, tlv_off, tlv_end, 0x04, &co, &vo, &w, &v))
+    e->target_id = (int)v;
   snprintf(e->key, sizeof(e->key), "%02x:%d:%d:%d", e->opcode, e->endpoint,
            e->cluster_id, e->target_id);
 }
@@ -211,21 +340,11 @@ catalog_entry_t catalog_clone_with_ids(const catalog_entry_t *src, int endpoint,
   e.bytes = malloc(src->len);
   memcpy(e.bytes, src->bytes, src->len);
   e.len = src->len;
-  int mh = mm_msg_header_len(e.bytes, 0, e.len);
-  int ph = mm_payload_header_len(e.bytes, (unsigned int)mh, e.len);
-  unsigned int tlv_off = (unsigned int)mh + (unsigned int)ph;
-  unsigned int tlv_end =
-      e.len > MATTER_MIC_LEN ? e.len - MATTER_MIC_LEN : e.len;
-  int off;
-  if (endpoint >= 0 &&
-      tlv_find_ctx_u8(e.bytes, tlv_off, tlv_end, 0x02, &off) >= 0 && off >= 0)
-    e.bytes[off] = (unsigned char)endpoint;
-  if (cluster >= 0 &&
-      tlv_find_ctx_u8(e.bytes, tlv_off, tlv_end, 0x03, &off) >= 0 && off >= 0)
-    e.bytes[off] = (unsigned char)cluster;
-  if (target >= 0 &&
-      tlv_find_ctx_u8(e.bytes, tlv_off, tlv_end, 0x04, &off) >= 0 && off >= 0)
-    e.bytes[off] = (unsigned char)target;
+  /* set_ctx_uint recomputes offsets and may widen/realloc, so apply in order;
+     a later field's offset is re-found after an earlier widen. */
+  if (endpoint >= 0) set_ctx_uint(&e, 0x02, (unsigned long long)endpoint);
+  if (cluster >= 0)  set_ctx_uint(&e, 0x03, (unsigned long long)cluster);
+  if (target >= 0)   set_ctx_uint(&e, 0x04, (unsigned long long)target);
   entry_decode(&e);
   return e;
 }
