@@ -34,8 +34,18 @@ message-type level (catalog augmentation, enrichment, stall) while mutable spans
 are found deterministically by walking the TLV (`matter_get_mutable_ranges` →
 value bytes only, never headers/MIC). Enable LLM calls with `CHATAFL=1
 CHATAFL_LLM=1 CHATAFL_OPENAI_KEY=sk-…`; with no key it runs catalog-only, offline.
-The layer is firewalled from EclipseFuzz internals (FSM catalogs, oracles) to stay
-an independent baseline.
+Any OpenAI-compatible endpoint works — for a **local model on your GPU** (no key):
+
+```bash
+ollama serve & ; ollama pull qwen2.5:1.5b
+FUZZER=chatafl CHATAFL_LLM=1 CHATAFL_DEBUG=1 \
+  CHATAFL_OPENAI_BASE=http://localhost:11434 CHATAFL_OPENAI_MODEL=qwen2.5:1.5b \
+  AFLNET="$PWD" DUT=../../../out/afl-dut-cov/chip-all-clusters-app \
+  SEEDS="$PWD/matter/seeds" ./matter/run_campaign.sh /tmp/chatafl-llm
+```
+
+`CHATAFL_DEBUG=1` prints each LLM round-trip to stderr. The layer is firewalled
+from EclipseFuzz internals (FSM catalogs, oracles) to stay an independent baseline.
 
 ## How the pieces fit
 

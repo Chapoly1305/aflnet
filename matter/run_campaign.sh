@@ -67,9 +67,12 @@ case "$FUZZER" in
     [ -x "$AFL_BIN" ] || AFL_BIN="$AFLNET/afl-fuzz"
     export CHATAFL=1
     export CHATAFL_LLM="${CHATAFL_LLM:-0}"
-    if [ "$CHATAFL_LLM" = "1" ] && [ -z "${CHATAFL_OPENAI_KEY:-}${OPENAI_API_KEY:-}" ]; then
-      echo "FUZZER=chatafl CHATAFL_LLM=1 but no CHATAFL_OPENAI_KEY/OPENAI_API_KEY set;"
-      echo "the run will proceed catalog-only (offline)."
+    # LLM is satisfied by an API key OR a custom base (e.g. Ollama at
+    # CHATAFL_OPENAI_BASE=http://localhost:11434, CHATAFL_OPENAI_MODEL=qwen2.5:1.5b).
+    if [ "$CHATAFL_LLM" = "1" ] &&
+       [ -z "${CHATAFL_OPENAI_KEY:-}${OPENAI_API_KEY:-}${CHATAFL_OPENAI_BASE:-}" ]; then
+      echo "FUZZER=chatafl CHATAFL_LLM=1 but no CHATAFL_OPENAI_KEY/OPENAI_API_KEY/"
+      echo "CHATAFL_OPENAI_BASE set; the run will proceed catalog-only (offline)."
     fi
     ;;
   *)

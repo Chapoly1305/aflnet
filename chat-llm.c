@@ -48,7 +48,19 @@ static const char *llm_api_base(void) {
 int matter_llm_enabled(void) {
   const char *e = getenv("CHATAFL_LLM");
   if (!e || strcmp(e, "1") != 0) return 0;
-  return llm_api_key() != NULL;
+  /* Enabled with an API key OR a custom base — the latter covers local
+     OpenAI-compatible servers (Ollama, vLLM, llama.cpp, LM Studio) that need
+     no key. */
+  if (llm_api_key()) return 1;
+  const char *b = getenv("CHATAFL_OPENAI_BASE");
+  return (b && *b) ? 1 : 0;
+}
+
+/* Chat model id sent to the endpoint. Override with CHATAFL_OPENAI_MODEL
+   (e.g. "qwen2.5:1.5b" for Ollama). */
+static const char *llm_chat_model(void) {
+  const char *m = getenv("CHATAFL_OPENAI_MODEL");
+  return (m && *m) ? m : "gpt-3.5-turbo";
 }
 
 struct mem_chunk {
@@ -71,7 +83,6 @@ static size_t write_cb(void *contents, size_t size, size_t nmemb, void *userp) {
 char *chat_with_llm(const char *prompt, const char *model, int tries,
                     float temperature) {
   const char *key = llm_api_key();
-  if (!key) return NULL;
 
   CURL *curl = curl_easy_init();
   if (!curl) return NULL;
@@ -81,8 +92,12 @@ char *chat_with_llm(const char *prompt, const char *model, int tries,
   snprintf(url, sizeof(url), "%s/v1/%s", llm_api_base(),
            is_instruct ? "completions" : "chat/completions");
 
+  const char *model_id = is_instruct ? "gpt-3.5-turbo-instruct" : llm_chat_model();
+  int debug = getenv("CHATAFL_DEBUG") != NULL;
+
   char auth_header[4096];
-  snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", key);
+  if (key) /* omit when keyless (local servers like Ollama) */
+    snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", key);
 
   char *answer = NULL;
   do {
@@ -91,22 +106,22 @@ char *chat_with_llm(const char *prompt, const char *model, int tries,
       json_object *jstr = json_object_new_string(prompt);
       const char *esc = json_object_to_json_string(jstr); /* quoted+escaped */
       asprintf(&data,
-               "{\"model\": \"gpt-3.5-turbo-instruct\", \"prompt\": %s, "
+               "{\"model\": \"%s\", \"prompt\": %s, "
                "\"max_tokens\": %d, \"temperature\": %f}",
-               esc, MATTER_MAX_TOKENS, temperature);
+               model_id, esc, MATTER_MAX_TOKENS, temperature);
       json_object_put(jstr);
     } else {
       asprintf(&data,
-               "{\"model\": \"gpt-3.5-turbo\", \"messages\": %s, "
+               "{\"model\": \"%s\", \"messages\": %s, "
                "\"max_tokens\": %d, \"temperature\": %f}",
-               prompt, MATTER_MAX_TOKENS, temperature);
+               model_id, prompt, MATTER_MAX_TOKENS, temperature);
     }
 
     struct mem_chunk chunk = {.memory = malloc(1), .size = 0};
     chunk.memory[0] = 0;
 
     struct curl_slist *headers = NULL;
-    headers = curl_slist_append(headers, auth_header);
+    if (key) headers = curl_slist_append(headers, auth_header);
     headers = curl_slist_append(headers, "Content-Type: application/json");
     headers = curl_slist_append(headers, "Accept: application/json");
 
@@ -118,6 +133,12 @@ char *chat_with_llm(const char *prompt, const char *model, int tries,
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
 
     CURLcode res = curl_easy_perform(curl);
+
+    if (debug)
+      fprintf(stderr,
+              "[chatafl-llm] POST %s model=%s -> curl=%d bytes=%zu resp=%.200s\n",
+              url, model_id, (int)res, chunk.size,
+              chunk.size ? chunk.memory : "(empty)");
 
     if (res == CURLE_OK && chunk.size > 0) {
       json_object *jobj = json_tokener_parse(chunk.memory);
