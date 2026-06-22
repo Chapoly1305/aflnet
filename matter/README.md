@@ -114,9 +114,10 @@ AFLNet's legacy `afl-clang-fast` LLVM pass no longer builds on modern LLVM, and
 the SDK is built with pigweed's own clang. So the DUT is instrumented with the
 SDK toolchain via `-fsanitize-coverage=trace-pc-guard`, whose callbacks are
 provided by AFLNet's `afl-llvm-rt.o.c` (built with `USE_TRACE_PC`). A **deferred
-forkserver** is started after init (before the event loop) so each fuzzing child
-inherits the already-bound socket instead of re-running `Server::Init()`. Full
-design: `ai_docs/benchmark-fuzzers.md` §Instrumentation & forkserver.
+forkserver** is started after init inside the POSIX event loop, immediately
+before `select()`, so each fuzzing child inherits the already-bound socket and
+is ready to receive AFLNet's UDP datagram without re-running `Server::Init()`.
+Full design: `ai_docs/benchmark-fuzzers.md` §Instrumentation & forkserver.
 
 ### Known Linux-host caveats
 
