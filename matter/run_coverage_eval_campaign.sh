@@ -25,7 +25,7 @@
 #                                 [--out-dir DIR] [--no-aggregate]
 #
 # Examples:
-#   ./run_coverage_eval_campaign.sh                           # 20 instances, 24 h
+#   ./run_coverage_eval_campaign.sh                           # 20 instances, 8 h
 #   ./run_coverage_eval_campaign.sh --instances 5 --max-total-time 3600  # smoke
 set -euo pipefail
 
@@ -184,6 +184,7 @@ sample_instance() {
     # Start coverage DUT.
     env LLVM_PROFILE_FILE="${profraw_pat}" \
         MATTER_FUZZ_INMEMORY_STORAGE=1 \
+        LLVM_PROFILE_FILE=/dev/null \
         MATTER_FUZZ_STORAGE_DIR="${kvs_dir}" \
         MATTER_FUZZ_KVS_PATH="${kvs}" \
       "${COV_DUT}" --secured-device-port "${cov_port}" --KVS "${kvs}" \
@@ -262,6 +263,12 @@ for i in $(seq 1 "${INSTANCES}"); do
   # Write coverage-run.env so aggregate_coverage_over_time.py finds the binary.
   echo "MATTER_FUZZ_COVERAGE_BINARY=${COV_DUT}" > "${inst_dir}/coverage-run.env"
 
+  # Copy seeds to a private per-instance directory so hardlinks in afl-fuzz's
+  # queue don't share inodes across instances (avoids "Short read" races when
+  # the dry-run calibration touches queue files concurrently).
+  inst_seeds="${inst_dir}/seeds"
+  cp -r "${SEED_DIR}" "${inst_seeds}"
+
   # Stagger instance starts: 3 s apart so DUT forkservers don't all compete for
   # CPU at the same moment during dry_run calibration.  Instance 1 starts
   # immediately; each subsequent one waits 3 s more.
@@ -281,11 +288,12 @@ for i in $(seq 1 "${INSTANCES}"); do
         DUT="${FUZZ_DUT}" \
         PORT="${fuzz_port}" \
         DELAY=20000 \
-        SEEDS="${SEED_DIR}" \
+        SEEDS="${inst_seeds}" \
         KVS="${inst_kvs}" \
         MATTER_FUZZ_STORAGE_DIR="${inst_storage_dir}" \
         MATTER_FUZZ_KVS_PATH="${inst_kvs}" \
         MATTER_FUZZ_INMEMORY_STORAGE=1 \
+        LLVM_PROFILE_FILE=/dev/null \
       "${RUNNER}" "${afl_out}" \
       > "${inst_dir}/instance.log" 2>&1 || true
     touch "${inst_dir}/.done"
