@@ -2134,7 +2134,7 @@ unsigned int* extract_response_codes_matter(unsigned char* buf, unsigned int buf
         else if (etype == 0x0A) scan += 4;
         else if (etype == 0x0B) scan += 8;
       }
-      if (im_status > 0) {
+      if (im_status > 0 || (etype == 0x04 && tag_len <= 2)) {  // include SUCCESS (0x00)
         status_code = (status_code << 8) | (im_status & 0xFF);
       }
     }
