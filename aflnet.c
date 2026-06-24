@@ -2106,7 +2106,7 @@ unsigned int* extract_response_codes_matter(unsigned char* buf, unsigned int buf
     if (protocol_id == 0x0001 && tlv_start + 2 < buf_size) {
       switch (opcode) {
 
-      case 0x01: // StatusResponse: struct{ctx0:StatusIB} -> StatusIB: struct{ctx0:uint8 Status}
+      case 0x01: // StatusResponse: StatusResponseMessage ctx0=uint8 Status (NOT StatusIB)
         if (buf[tlv_start] == 0x15) {
           unsigned int s = tlv_start + 1;
           while (s < tlv_start + 64 && s + 2 < buf_size) {
@@ -2116,20 +2116,21 @@ unsigned int* extract_response_codes_matter(unsigned char* buf, unsigned int buf
         }
         break;
 
-      case 0x09: // InvokeResponse: struct{ctx1:InvokeResponseIB}
-                 // InvokeResponseIB: struct{ctx0:Command|ctx1:CommandStatusIB}
-                 // CommandStatusIB: struct{ctx0:Path, ctx1:StatusIB}
-                 // StatusIB: struct{ctx0:uint8 Status}
-        if (buf[tlv_start] == 0x15) {
+      case 0x09: // InvokeResponse (4.11.4): InvokeResponseMessage -> ctx1:array of InvokeResponseIB
+                 // InvokeResponseIB (struct): ctx0:CommandDataIB OR ctx1:CommandStatusIB
+                 // CommandStatusIB (struct): ctx0:CommandPathIB, ctx1:StatusIB
+                 // StatusIB (struct): ctx0:uint8 Status
+        if (buf[tlv_start] == 0x15) {  // outer struct
           unsigned int s = tlv_start + 1;
           while (s < tlv_start + 128 && s + 2 < buf_size) {
-            if (buf[s] == 0x25 && buf[s+1] == 0x01) {  // ctx1 InvokeResponseIB
+            // InvokeResponseMessage.kInvokeResponses = ctx1 ARRAY (0x36 0x01)
+            if (buf[s] == 0x36 && buf[s+1] == 0x01) {  // ctx1 array of InvokeResponseIB
               unsigned int ir = (buf[s+2] == 0x15) ? s + 3 : s + 2;
               while (ir < s + 128 && ir + 2 < buf_size) {
-                if (buf[ir] == 0x25 && buf[ir+1] == 0x01) {  // ctx1 CommandStatusIB
+                if (buf[ir] == 0x35 && buf[ir+1] == 0x01) {  // ctx1 CommandStatusIB (struct)
                   unsigned int cs = (buf[ir+2] == 0x15) ? ir + 3 : ir + 2;
                   while (cs < ir + 128 && cs + 2 < buf_size) {
-                    if (buf[cs] == 0x25 && buf[cs+1] == 0x01) {  // ctx1 StatusIB
+                    if (buf[cs] == 0x35 && buf[cs+1] == 0x01) {  // ctx1 StatusIB (struct)
                       unsigned int st = (buf[cs+2] == 0x15) ? cs + 3 : cs + 2;
                       while (st < cs + 32 && st + 2 < buf_size) {
                         if (buf[st] == 0x24 && buf[st+1] == 0x00) {
@@ -2161,7 +2162,7 @@ unsigned int* extract_response_codes_matter(unsigned char* buf, unsigned int buf
             if (buf[s] == 0x36 && buf[s+1] == 0x00) {  // ctx0 array
               unsigned int ai = (buf[s+2] == 0x15) ? s + 3 : s + 2;
               while (ai < s + 64 && ai + 2 < buf_size) {
-                if (buf[ai] == 0x25 && buf[ai+1] == 0x01) {  // ctx1 StatusIB
+                if (buf[ai] == 0x35 && buf[ai+1] == 0x01) {  // ctx1 StatusIB (struct)
                   unsigned int st = (buf[ai+2] == 0x15) ? ai + 3 : ai + 2;
                   while (st < ai + 32 && st + 2 < buf_size) {
                     if (buf[st] == 0x24 && buf[st+1] == 0x00) {
@@ -2180,11 +2181,11 @@ unsigned int* extract_response_codes_matter(unsigned char* buf, unsigned int buf
         }
         break;
 
-      case 0x05: // ReportData: complex. Scan for first StatusIB (ctx1) -> ctx0 uint8.
+      case 0x05: // ReportData (4.11.3): ctx1:AttributeReportIBs array -> struct -> ctx2:AttributeStatusIB -> ctx1:StatusIB
         if (buf[tlv_start] == 0x15) {
           unsigned int s = tlv_start + 1;
           while (s < tlv_start + 200 && s + 3 < buf_size) {
-            if (buf[s] == 0x25 && buf[s+1] == 0x01) {  // ctx1 StatusIB
+            if (buf[s] == 0x35 && buf[s+1] == 0x01) {  // ctx1 StatusIB (struct)
               unsigned int st = (buf[s+2] == 0x15) ? s + 3 : s + 2;
               while (st < s + 32 && st + 2 < buf_size) {
                 if (buf[st] == 0x24 && buf[st+1] == 0x00) {
