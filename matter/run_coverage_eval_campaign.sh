@@ -38,7 +38,7 @@ AGGREGATOR="${REPO_ROOT}/examples/fuzzers/eclipsefuzz/stateful/tools/aggregate_c
 DASHBOARD="${REPO_ROOT}/examples/fuzzers/eclipsefuzz/stateful/tools/generate_coverage_dashboard.py"
 
 INSTANCES=20
-MAX_TOTAL_TIME=86400
+MAX_TOTAL_TIME=28800
 INTERVAL=1800
 BASE_PORT=5560
 SEEDS_KIND="both"
@@ -94,7 +94,12 @@ case "${SEEDS_KIND}" in
     SEED_DIR="${REPO_ROOT}/out/aflnet-seeds-${SEEDS_KIND}"
     echo "[afl-eval] rebuilding ${SEEDS_KIND} seeds -> ${SEED_DIR}"
     rm -rf "${SEED_DIR}"
-    python3 "${CONVERTER}" --corpus "${SEEDS_KIND}" --out "${SEED_DIR}" "${LIMIT_ARG[@]}" ;;
+    if ! python3 "${CONVERTER}" --corpus "${SEEDS_KIND}" --out "${SEED_DIR}" "${LIMIT_ARG[@]}"; then
+      echo "[afl-eval] FATAL: seed conversion failed; aborting campaign" >&2
+      exit 1
+    fi
+    [[ -d "${SEED_DIR}" && -n "$(ls -A "${SEED_DIR}" 2>/dev/null)" ]] || {
+      echo "[afl-eval] FATAL: seed dir ${SEED_DIR} empty after conversion" >&2; exit 1; } ;;
   *) echo "[afl-eval] unknown --seeds '${SEEDS_KIND}' (gen|fsm|plain|both)" >&2; exit 1 ;;
 esac
 
