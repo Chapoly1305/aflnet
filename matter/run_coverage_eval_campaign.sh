@@ -162,9 +162,10 @@ sample_instance() {
     local out="${snap_dir}/snapshot-${elapsed}s.profdata"
     if llvm-profdata merge --failure-mode=warn "${merge_args[@]}" -o "${out}" 2>/dev/null \
        && [[ -s "${out}" ]]; then
-      # Update baseline and remove consumed profraws.
+      # Update baseline and remove consumed profraws + stale lock files.
       cp "${out}" "${baseline}"
       rm -f "${profraws[@]}" 2>/dev/null
+      rm -f "${profraw_dir}"/.bucket-*.lock 2>/dev/null
       echo "${elapsed},${out},${#profraws[@]}" >> "${timeline}"
     fi
   }
