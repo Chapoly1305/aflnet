@@ -195,10 +195,15 @@ for i in $(seq 1 "${INSTANCES}"); do
     sleep 1
 
     timeout 10 python3 -c "
-import socket
+import socket, struct
+data = open('${seed}', 'rb').read()
+# Strip AFLNet message boundary headers: [4-byte size][message]...
+# We send only the first message (Matter seeds are single-message).
+msg_len = struct.unpack('<I', data[:4])[0]
+payload = data[4:4+msg_len]
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.settimeout(5)
-s.sendto(open('${seed}','rb').read(), ('127.0.0.1', ${cov_port}))
+s.sendto(payload, ('127.0.0.1', ${cov_port}))
 try: s.recvfrom(4096)
 except: pass
 s.close()
@@ -211,8 +216,13 @@ s.close()
     pf=$(find "${profraw_dir}" -name "seed-${count}-*.profraw" -type f 2>/dev/null | head -1)
     [[ -n "${pf}" ]] && accum_profraws+=("${pf}")
 
-    # Run llvm-profdata merge (like gcovr) every SKIPCOUNT seeds
-    if [[ $((count % SKIPCOUNT)) -ne 0 && "${count}" -ne "${total_seeds}" ]]; then
+    # Snapshot logic (match ProFuzzBench):
+    #   Initial seeds (contain 'orig:' in name): snapshot after EVERY seed.
+    #   Discovered seeds: snapshot every SKIPCOUNT seeds.
+    #   Last seed: always snapshot.
+    local is_initial=0
+    [[ "$(basename "${seed}")" == *"orig:"* ]] && is_initial=1
+    if [[ "${is_initial}" -eq 0 && $((count % SKIPCOUNT)) -ne 0 && "${count}" -ne "${total_seeds}" ]]; then
       continue
     fi
     [[ "${#accum_profraws[@]}" -eq 0 ]] && continue
