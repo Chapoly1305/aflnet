@@ -209,13 +209,17 @@ for i in $(seq 1 "${INSTANCES}"); do
     timeout 10 python3 -c "
 import socket, struct
 data = open('${seed}', 'rb').read()
-msg_len = struct.unpack('<I', data[:4])[0]
-payload = data[4:4+msg_len]
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.settimeout(5)
-s.sendto(payload, ('127.0.0.1', ${cov_port}))
-try: s.recvfrom(4096)
-except: pass
+pos = 0
+while pos + 4 <= len(data):
+    msg_len = struct.unpack('<I', data[pos:pos+4])[0]
+    pos += 4
+    payload = data[pos:pos+msg_len]
+    pos += msg_len
+    s.sendto(payload, ('127.0.0.1', ${cov_port}))
+    try: s.recvfrom(4096)
+    except: pass
 s.close()
 " 2>/dev/null || true
 
