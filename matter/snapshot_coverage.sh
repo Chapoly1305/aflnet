@@ -122,9 +122,24 @@ for seed in "${initial[@]}"; do
   count=$((count + 1))
   pf=$(replay_one "${seed}" "${count}")
   [[ -n "${pf}" ]] && accum+=("${pf}")
-  # Always snapshot initial seeds
-  merge_now=1
 done
+
+# Snapshot after initial seeds
+if [[ "${#accum[@]}" -gt 0 ]]; then
+  merge_args=()
+  [[ -f "${BASELINE}" ]] && merge_args+=("${BASELINE}")
+  merge_args+=("${accum[@]}")
+  tmp_out="${SNAP_DIR}/snap-tmp.profdata"
+  if llvm-profdata merge --failure-mode=warn "${merge_args[@]}" -o "${tmp_out}" 2>/dev/null && [[ -s "${tmp_out}" ]]; then
+    cp "${tmp_out}" "${BASELINE}"
+    rm -f "${accum[@]}" 2>/dev/null
+    cov=$(llvm-profdata show --all-functions "${BASELINE}" 2>/dev/null | grep -c "Function count: [1-9]" || echo 0)
+    tot=$(llvm-profdata show --all-functions "${BASELINE}" 2>/dev/null | grep -c "Function count:" || echo 0)
+    echo "${count},$(date +%s),${cov},${tot}" >> "${OUTPUT}"
+    echo "[snapshot] init seeds done (${count}): ${cov}/${tot} functions covered" >&2
+  fi
+  accum=()
+fi
 
 disc_total="${#discovered[@]}"
 disc_idx=0
@@ -140,15 +155,15 @@ for seed in "${discovered[@]}"; do
   [[ "${#accum[@]}" -eq 0 ]] && continue
 
   # Merge
-  local merge_args=()
+  merge_args=()
   [[ -f "${BASELINE}" ]] && merge_args+=("${BASELINE}")
   merge_args+=("${accum[@]}")
-  local tmp_out="${SNAP_DIR}/snap-tmp.profdata"
+  tmp_out="${SNAP_DIR}/snap-tmp.profdata"
   if llvm-profdata merge --failure-mode=warn "${merge_args[@]}" -o "${tmp_out}" 2>/dev/null && [[ -s "${tmp_out}" ]]; then
     cp "${tmp_out}" "${BASELINE}"
     rm -f "${accum[@]}" 2>/dev/null
-    local cov=$(llvm-profdata show --all-functions "${BASELINE}" 2>/dev/null | grep -c "Function count: [1-9]" || echo 0)
-    local tot=$(llvm-profdata show --all-functions "${BASELINE}" 2>/dev/null | grep -c "Function count:" || echo 0)
+    cov=$(llvm-profdata show --all-functions "${BASELINE}" 2>/dev/null | grep -c "Function count: [1-9]" || echo 0)
+    tot=$(llvm-profdata show --all-functions "${BASELINE}" 2>/dev/null | grep -c "Function count:" || echo 0)
     echo "${count},$(date +%s),${cov},${tot}" >> "${OUTPUT}"
     echo "[snapshot] seed ${count}/${total}: ${cov}/${tot} functions covered" >&2
   fi
