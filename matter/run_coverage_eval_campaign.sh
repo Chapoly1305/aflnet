@@ -144,74 +144,38 @@ fi
 # ---------------------------------------------------------------------------
 sample_instance() {
   local inst_dir="$1" start_epoch="$2" stagger="$3" cov_port="$4"
-  local afl_out="${inst_dir}/afl-out"
   local snap_dir="${inst_dir}/snapshots"
-  local prof_dir="${inst_dir}/profraw"
+  local profraw_dir="${inst_dir}/profraw"
   local timeline="${inst_dir}/timeline.csv"
-  mkdir -p "${snap_dir}" "${prof_dir}"
+  mkdir -p "${snap_dir}" "${profraw_dir}"
   echo "elapsed_s,snapshot,profraw_count" > "${timeline}"
+
+  # Cumulative baseline: snapshot N = merge(baseline + new profraws).
+  # After each snapshot, profraws are deleted and the baseline is updated
+  # so peak storage is bounded (~1-2 GB per instance between snapshots).
+  local baseline="${inst_dir}/baseline.profdata"
 
   snapshot_once() {
     local now elapsed
     now="$(date +%s)"; elapsed=$(( now - start_epoch ))
 
-    local replay_queue="${afl_out}/replayable-queue"
-    [[ -d "${replay_queue}" ]] || return 0
-    [[ -n "$(ls -A "${replay_queue}" 2>/dev/null)" ]] || return 0
+    [[ -d "${profraw_dir}" ]] || return 0
 
-    # Atomic copy to avoid racing AFL writes.
-    local tmp_queue
-    tmp_queue="$(mktemp -d)"
-    cp "${replay_queue}/"* "${tmp_queue}/" 2>/dev/null || { rm -rf "${tmp_queue}"; return 0; }
-    [[ -n "$(ls -A "${tmp_queue}")" ]] || { rm -rf "${tmp_queue}"; return 0; }
-
-    local profraw_pat="${prof_dir}/snap-${elapsed}s-%p.profraw"
-
-    # ── Isolated KVS + storage directory ──────────────────────────────
-    # Every snapshot gets a private temp directory so coverage DUTs never
-    # share chip_factory.ini / chip_config.ini / chip_counters.ini across
-    # instances or across snapshot cycles.  PosixConfig resolves env vars:
-    #   MATTER_FUZZ_STORAGE_DIR  → base dir for factory/config/counters
-    #   MATTER_FUZZ_KVS_PATH     → general KVS path (prefer --KVS)
-    # Failure to create this dir is fatal — bail early rather than race
-    # on shared /tmp state.
-    # ──────────────────────────────────────────────────────────────────
-    local kvs_dir kvs
-    kvs_dir="$(mktemp -d)"
-    [[ -d "${kvs_dir}" ]] || { echo "[snapshot] FATAL: mktemp -d failed" >&2; return 1; }
-    kvs="${kvs_dir}/chip_kvs"
-
-    # Start coverage DUT.
-    env LLVM_PROFILE_FILE="${profraw_pat}" \
-        MATTER_FUZZ_INMEMORY_STORAGE=1 \
-        LLVM_PROFILE_FILE=/dev/null \
-        MATTER_FUZZ_STORAGE_DIR="${kvs_dir}" \
-        MATTER_FUZZ_KVS_PATH="${kvs}" \
-      "${COV_DUT}" --secured-device-port "${cov_port}" --KVS "${kvs}" \
-      >"${kvs_dir}/dut-stderr.log" 2>&1 &
-    local dut_pid=$!
-
-    # Wait for DUT event loop to be ready (~500 ms is enough for this DUT).
-    sleep 1
-
-    # Replay queue (timeout 4 min to bound sampler duration).
-    timeout 240 python3 "${REPLAYER}" \
-      --queue-dir "${tmp_queue}" --port "${cov_port}" 2>/dev/null || true
-
-    # Graceful shutdown — SIGTERM triggers profraw flush.
-    kill -TERM "${dut_pid}" 2>/dev/null || true
-    wait "${dut_pid}" 2>/dev/null || true
-    rm -rf "${tmp_queue}" "${kvs_dir}" 2>/dev/null || true
-
-    # Merge all profraw files for this snapshot point.
     local profraws=()
     while IFS= read -r f; do profraws+=("$f"); done \
-      < <(find "${prof_dir}" -name "snap-${elapsed}s-*.profraw" -type f 2>/dev/null | sort)
-    [[ "${#profraws[@]}" -eq 0 ]] && return 0
+      < <(find "${profraw_dir}" -name "dump-*.profraw" -type f 2>/dev/null | sort)
+    [[ "${#profraws[@]}" -eq 0 && ! -f "${baseline}" ]] && return 0
+
+    local merge_args=()
+    [[ -f "${baseline}" ]] && merge_args+=("${baseline}")
+    merge_args+=("${profraws[@]}")
 
     local out="${snap_dir}/snapshot-${elapsed}s.profdata"
-    if llvm-profdata merge --failure-mode=warn "${profraws[@]}" -o "${out}" 2>/dev/null \
+    if llvm-profdata merge --failure-mode=warn "${merge_args[@]}" -o "${out}" 2>/dev/null \
        && [[ -s "${out}" ]]; then
+      # Update baseline and remove consumed profraws.
+      cp "${out}" "${baseline}"
+      rm -f "${profraws[@]}" 2>/dev/null
       echo "${elapsed},${out},${#profraws[@]}" >> "${timeline}"
     fi
   }
@@ -246,6 +210,14 @@ for i in $(seq 1 "${INSTANCES}"); do
   cov_port=$(( BASE_PORT + 200 + i - 1 ))
   start_epoch="$(date +%s)"
   inst_seed=$(( (start_epoch + i * 7919) % 1000000 ))
+
+  # ── Per-instance profraw directory ────────────────────────────────
+  # The SIGTERM handler (AppMain.cpp, MATTER_FUZZ_AFL_INSTRUMENT) dumps
+  # LLVM source-coverage profraw files here.  One file per ~30 s window
+  # (time-bucketed O_EXCL).  The sampler merges them for snapshots.
+  # ──────────────────────────────────────────────────────────────────
+  inst_profraw_dir="${inst_dir}/profraw"
+  mkdir -p "${inst_profraw_dir}"
 
   # ── Per-instance isolated storage ────────────────────────────────
   # Every instance gets its own MATTER_FUZZ_STORAGE_DIR so factory,
@@ -293,7 +265,8 @@ for i in $(seq 1 "${INSTANCES}"); do
         MATTER_FUZZ_STORAGE_DIR="${inst_storage_dir}" \
         MATTER_FUZZ_KVS_PATH="${inst_kvs}" \
         MATTER_FUZZ_INMEMORY_STORAGE=1 \
-        LLVM_PROFILE_FILE=/dev/null \
+        LLVM_PROFILE_FILE="${inst_profraw_dir}/dump-%p.profraw" \
+        AFL_PROFRAW_DIR="${inst_profraw_dir}" \
       "${RUNNER}" "${afl_out}" \
       > "${inst_dir}/instance.log" 2>&1 || true
     touch "${inst_dir}/.done"
