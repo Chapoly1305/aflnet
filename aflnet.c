@@ -2012,7 +2012,9 @@ region_t* extract_requests_matter(unsigned char* buf, unsigned int buf_size, uns
   region_t *regions = NULL;
   unsigned int pos = 0;
 
-  while (pos < buf_size) {
+#define MATTER_MAX_REGIONS 8192
+
+  while (pos < buf_size && region_count < MATTER_MAX_REGIONS) {
     int mh = matter_msg_header_len(buf, pos, buf_size);
     if (mh < 0) break;
     int ph = matter_payload_header_len(buf, pos + (unsigned int)mh, buf_size);
@@ -2033,6 +2035,8 @@ region_t* extract_requests_matter(unsigned char* buf, unsigned int buf_size, uns
     regions[region_count - 1].state_count = 0;
     pos += msg_len;
   }
+
+#undef MATTER_MAX_REGIONS
 
   // Fallback: treat the whole buffer as a single region if parsing failed.
   if ((region_count == 0) && (buf_size > 0)) {
@@ -2057,11 +2061,12 @@ unsigned int* extract_response_codes_matter(unsigned char* buf, unsigned int buf
   unsigned int state_count = 0;
   unsigned int pos = 0;
 
+#define MATTER_MAX_STATES 4096
   state_count++;
   state_sequence = (unsigned int *)ck_realloc(state_sequence, state_count * sizeof(unsigned int));
   state_sequence[state_count - 1] = 0; // initial status code
 
-  while (pos < buf_size) {
+  while (pos < buf_size && state_count < MATTER_MAX_STATES) {
     int mh = matter_msg_header_len(buf, pos, buf_size);
     if (mh < 0) break;
     int ph = matter_payload_header_len(buf, pos + (unsigned int)mh, buf_size);
@@ -2092,6 +2097,7 @@ unsigned int* extract_response_codes_matter(unsigned char* buf, unsigned int buf
     pos += adv;
   }
 
+#undef MATTER_MAX_STATES
   *state_count_ref = state_count;
   return state_sequence;
 }
