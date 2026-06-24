@@ -1887,7 +1887,7 @@ static unsigned char dtls12_version[2] = {0xFE, 0xFD};
 // ---------------------------------------------------------------------------
 // Matter (CHIP) protocol parser.
 //
-// Targets the all-clusters-app DUT built with matter_fuzz_afl_transport=true,
+// Targets the all-clusters-app DUT built with matter_fuzz_dut_transport=true,
 // which accepts mutated *plaintext* Matter packets and emits *plaintext*
 // responses (AES-CCM + MIC verification bypassed; see ai_docs/benchmark-fuzzers.md).
 //
@@ -1922,7 +1922,10 @@ static int matter_msg_header_len(const unsigned char* buf, unsigned int off, uns
   unsigned char dsiz = msg_flags & 0x03;
   if (dsiz == 0x01) len += 8;                // Destination Node ID
   else if (dsiz == 0x02) len += 2;           // Destination Group ID
-  else if (dsiz == 0x03) return -1;          // reserved -> malformed
+  // dsiz == 0x03 is reserved per spec (4.4.1.1); treat as no destination
+  // so havoc/corruption of the flags byte doesn't force the fallback path
+  // (entire buffer as one datagram), which can trigger DUT aborts under
+  // the forkserver.
   if (off + (unsigned int)len > size) return -1;
   return len;
 }
