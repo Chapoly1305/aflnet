@@ -173,32 +173,42 @@ for i in $(seq 1 "${INSTANCES}"); do
   replay_queue="${afl_out}/replayable-queue"
   [[ -d "${replay_queue}" ]] || { echo "[afl-eval] no queue for instance-${idx}, skip"; continue; }
 
-  # Collect seeds sorted by timestamp (match ProFuzzBench's stat -c %Y)
-  mapfile -t SEEDS < <(find "${replay_queue}" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | cut -d' ' -f2-)
-  total_seeds="${#SEEDS[@]}"
-  echo "[afl-eval] instance-${idx}: ${total_seeds} seeds"
+  # Collect seeds in two groups (match ProFuzzBench):
+  #   Group 1: initial corpus seeds (contain 'orig:' in name)
+  #   Group 2: discovered seeds (everything else)
+  # Both groups sorted by file modification time.
+  local initial_seeds=() discovered_seeds=()
+  while IFS= read -r ts seed; do
+    if [[ "$(basename "${seed}")" == *"orig:"* ]]; then
+      initial_seeds+=("${seed}")
+    else
+      discovered_seeds+=("${seed}")
+    fi
+  done < <(find "${replay_queue}" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | cut -d' ' -f2-)
+  total_seeds=$(( ${#initial_seeds[@]} + ${#discovered_seeds[@]} ))
+  echo "[afl-eval] instance-${idx}: ${#initial_seeds[@]} initial + ${#discovered_seeds[@]} discovered = ${total_seeds} seeds"
 
-  count=0; accum_profraws=(); start_epoch="$(date +%s)"
-
-  for seed in "${SEEDS[@]}"; do
+  count=0; accum_profraws=()
+  process_batch() {
+    local seed="$1" is_initial="$2" is_last="$3"
     count=$((count + 1))
 
-    # Per-seed restart of coverage DUT (exact ProFuzzBench semantics).
+    # Use seed file mtime (match ProFuzzBench's stat -c %Y).
+    local seed_ts; seed_ts=$(stat -c %Y "${seed}" 2>/dev/null || echo 0)
+
     kvs_dir="$(mktemp -d)"; kvs="${kvs_dir}/chip_kvs"
-    profraw="${profraw_dir}/seed-${count}-%p.profraw"
+    local profraw="${profraw_dir}/seed-${count}-%p.profraw"
 
     env LLVM_PROFILE_FILE="${profraw}" \
         MATTER_FUZZ_STORAGE_DIR="${kvs_dir}" MATTER_FUZZ_KVS_PATH="${kvs}" \
       "${COV_DUT}" --secured-device-port "${cov_port}" --KVS "${kvs}" \
       >"${kvs_dir}/dut-stderr.log" 2>&1 &
-    dut_pid=$!
+    local dut_pid=$!
     sleep 1
 
     timeout 10 python3 -c "
 import socket, struct
 data = open('${seed}', 'rb').read()
-# Strip AFLNet message boundary headers: [4-byte size][message]...
-# We send only the first message (Matter seeds are single-message).
 msg_len = struct.unpack('<I', data[:4])[0]
 payload = data[4:4+msg_len]
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -213,34 +223,48 @@ s.close()
     wait "${dut_pid}" 2>/dev/null || true
     rm -rf "${kvs_dir}" 2>/dev/null || true
 
-    pf=$(find "${profraw_dir}" -name "seed-${count}-*.profraw" -type f 2>/dev/null | head -1)
+    local pf; pf=$(find "${profraw_dir}" -name "seed-${count}-*.profraw" -type f 2>/dev/null | head -1)
     [[ -n "${pf}" ]] && accum_profraws+=("${pf}")
 
-    # Snapshot logic (match ProFuzzBench):
-    #   Initial seeds (contain 'orig:' in name): snapshot after EVERY seed.
-    #   Discovered seeds: snapshot every SKIPCOUNT seeds.
-    #   Last seed: always snapshot.
-    local is_initial=0
-    [[ "$(basename "${seed}")" == *"orig:"* ]] && is_initial=1
-    if [[ "${is_initial}" -eq 0 && $((count % SKIPCOUNT)) -ne 0 && "${count}" -ne "${total_seeds}" ]]; then
-      continue
+    # Snapshot: initial seeds → every seed; discovered → SKIPCOUNT; last → always.
+    if [[ "${is_initial}" -eq 0 && $((count % SKIPCOUNT)) -ne 0 && "${is_last}" -ne 1 ]]; then
+      return
     fi
-    [[ "${#accum_profraws[@]}" -eq 0 ]] && continue
+    [[ "${#accum_profraws[@]}" -eq 0 ]] && return
 
-    now="$(date +%s)"; elapsed=$(( now - start_epoch ))
-    merge_args=()
+    local merge_args=()
     [[ -f "${baseline}" ]] && merge_args+=("${baseline}")
     merge_args+=("${accum_profraws[@]}")
 
-    out="${snap_dir}/snapshot-${elapsed}s.profdata"
+    local out="${snap_dir}/snapshot-${seed_ts}s.profdata"
     if llvm-profdata merge --failure-mode=warn "${merge_args[@]}" -o "${out}" 2>/dev/null \
        && [[ -s "${out}" ]]; then
       cp "${out}" "${baseline}"
       rm -f "${accum_profraws[@]}" 2>/dev/null
-      echo "${elapsed},${out},${#accum_profraws[@]},${count}" >> "${timeline}"
+      echo "${seed_ts},${out},${#accum_profraws[@]},${count}" >> "${timeline}"
     fi
     accum_profraws=()
+  }
+
+  # Phase 2a: replay initial corpus seeds first
+  for seed in "${initial_seeds[@]}"; do
+    process_batch "${seed}" 1 0
   done
+
+  # Phase 2b: replay discovered seeds
+  local disc_total="${#discovered_seeds[@]}"
+  local disc_idx=0
+  for seed in "${discovered_seeds[@]}"; do
+    disc_idx=$((disc_idx + 1))
+    local is_last=0; [[ "${disc_idx}" -eq "${disc_total}" && "${#initial_seeds[@]}" -eq 0 ]] && is_last=1
+    process_batch "${seed}" 0 "${is_last}"
+  done
+
+  # Final snapshot for the last seed if step > 1 (match ProFuzzBench lines 77-87)
+  if [[ "${SKIPCOUNT}" -gt 1 && "${#accum_profraws[@]}" -gt 0 ]]; then
+    process_batch "${discovered_seeds[-1]:-${initial_seeds[-1]}}" 0 1
+  fi
+
   echo "[afl-eval] instance-${idx}: ${total_seeds} seeds, $(wc -l < "${timeline}") snapshots"
 done &  # process instances in parallel for Phase 2
 wait
