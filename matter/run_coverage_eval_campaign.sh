@@ -178,11 +178,12 @@ for i in $(seq 1 "${INSTANCES}"); do
   total_seeds="${#SEEDS[@]}"
   echo "[afl-eval] instance-${idx}: ${total_seeds} seeds"
 
-  count=0; batch_profraws=(); start_epoch="$(date +%s)"
+  count=0; accum_profraws=(); start_epoch="$(date +%s)"
 
   for seed in "${SEEDS[@]}"; do
     count=$((count + 1))
 
+    # Per-seed restart of coverage DUT (exact ProFuzzBench semantics).
     kvs_dir="$(mktemp -d)"; kvs="${kvs_dir}/chip_kvs"
     profraw="${profraw_dir}/seed-${count}-%p.profraw"
 
@@ -208,29 +209,31 @@ s.close()
     rm -rf "${kvs_dir}" 2>/dev/null || true
 
     pf=$(find "${profraw_dir}" -name "seed-${count}-*.profraw" -type f 2>/dev/null | head -1)
-    [[ -n "${pf}" ]] && batch_profraws+=("${pf}")
+    [[ -n "${pf}" ]] && accum_profraws+=("${pf}")
 
-    # Snapshot every SKIPCOUNT seeds
-    if [[ $((count % SKIPCOUNT)) -eq 0 || "${count}" -eq "${total_seeds}" ]]; then
-      [[ "${#batch_profraws[@]}" -eq 0 ]] && continue
-
-      now="$(date +%s)"; elapsed=$(( now - start_epoch ))
-      merge_args=()
-      [[ -f "${baseline}" ]] && merge_args+=("${baseline}")
-      merge_args+=("${batch_profraws[@]}")
-
-      out="${snap_dir}/snapshot-${elapsed}s.profdata"
-      if llvm-profdata merge --failure-mode=warn "${merge_args[@]}" -o "${out}" 2>/dev/null \
-         && [[ -s "${out}" ]]; then
-        cp "${out}" "${baseline}"
-        rm -f "${batch_profraws[@]}" 2>/dev/null
-        echo "${elapsed},${out},${#batch_profraws[@]},${count}" >> "${timeline}"
-      fi
-      batch_profraws=()
+    # Run llvm-profdata merge (like gcovr) every SKIPCOUNT seeds
+    if [[ $((count % SKIPCOUNT)) -ne 0 && "${count}" -ne "${total_seeds}" ]]; then
+      continue
     fi
+    [[ "${#accum_profraws[@]}" -eq 0 ]] && continue
+
+    now="$(date +%s)"; elapsed=$(( now - start_epoch ))
+    merge_args=()
+    [[ -f "${baseline}" ]] && merge_args+=("${baseline}")
+    merge_args+=("${accum_profraws[@]}")
+
+    out="${snap_dir}/snapshot-${elapsed}s.profdata"
+    if llvm-profdata merge --failure-mode=warn "${merge_args[@]}" -o "${out}" 2>/dev/null \
+       && [[ -s "${out}" ]]; then
+      cp "${out}" "${baseline}"
+      rm -f "${accum_profraws[@]}" 2>/dev/null
+      echo "${elapsed},${out},${#accum_profraws[@]},${count}" >> "${timeline}"
+    fi
+    accum_profraws=()
   done
-  echo "[afl-eval] instance-${idx}: ${total_seeds} seeds replayed, $(wc -l < "${timeline}") snapshots"
-done
+  echo "[afl-eval] instance-${idx}: ${total_seeds} seeds, $(wc -l < "${timeline}") snapshots"
+done &  # process instances in parallel for Phase 2
+wait
 
 echo "ended=$(date -Iseconds)" >> "${OUT_DIR}/eval-meta.txt"
 echo "[afl-eval] coverage replay complete."
