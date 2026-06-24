@@ -45,7 +45,7 @@ SEEDS_KIND="both"
 SEED_LIMIT=0
 FUZZ_DUT="${REPO_ROOT}/out/afl-dut-cov/chip-all-clusters-app"
 COV_DUT="${REPO_ROOT}/out/afl-dut-llvmcov/chip-all-clusters-app"
-OUT_DIR="${REPO_ROOT}/out/aflnet-eval-$(date +%Y%m%d-%H%M)"
+OUT_DIR="${REPO_ROOT}/out/aflnet-eval-$(date +%Y%m%d-%H%M%S)"
 DO_AGGREGATE=1
 
 while [[ $# -gt 0 ]]; do
@@ -233,6 +233,7 @@ for i in $(seq 1 "${INSTANCES}"); do
   idx="$(printf '%02d' "${i}")"
   inst_dir="${OUT_DIR}/instance-${idx}"
   afl_out="${inst_dir}/afl-out"
+  rm -rf "${inst_dir}"
   mkdir -p "${inst_dir}" "${afl_out}"
 
   fuzz_port=$(( BASE_PORT + i - 1 ))
