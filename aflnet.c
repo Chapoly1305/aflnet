@@ -2097,6 +2097,48 @@ unsigned int* extract_response_codes_matter(unsigned char* buf, unsigned int buf
     unsigned int protocol_id = (unsigned int)buf[pid_off] | ((unsigned int)buf[pid_off + 1] << 8);
     unsigned int status_code = ((protocol_id & 0xff) << 8) | opcode;
 
+    // For IM responses (StatusResponse/InvokeResponse/WriteResponse/ReportData),
+    // also extract the application-level status from the TLV payload so that
+    // SUCCESS vs FAILURE vs UNSUPPORTED_COMMAND become distinct states rather
+    // than all collapsing to the same opcode bucket.
+    unsigned int im_status = 0;
+    unsigned int tlv_start = ph_off + (unsigned int)ph;
+    if (protocol_id == 0x0001 && tlv_start + 2 < buf_size) {
+      // Walk the TLV for the first context-tagged uint8 — the most common
+      // encoding for IM status codes in StatusIB / InvokeResponseIB.
+      unsigned int scan = tlv_start;
+      int depth = 0;
+      while (scan + 2 < buf_size && scan < tlv_start + 128 && depth >= 0) {
+        unsigned char ctrl = buf[scan];
+        unsigned char etype = ctrl & 0x1F;
+        if (etype == 0x18) { if (--depth < 0) break; scan++; continue; }
+        if (etype >= 0x15 && etype <= 0x17) { depth++; scan++; continue; }
+        unsigned int tag_len = 0;
+        switch (ctrl & 0xE0) {
+          case 0x00: tag_len = 0; break; case 0x20: tag_len = 1; break;
+          case 0x40: tag_len = 2; break; case 0x60: tag_len = 4; break;
+          case 0x80: tag_len = 2; break; case 0xA0: tag_len = 4; break;
+          case 0xC0: tag_len = 6; break; case 0xE0: tag_len = 8; break;
+          default: tag_len = 0;
+        }
+        scan++;
+        if (etype == 0x04 && tag_len == 1 && scan < buf_size) {
+          im_status = buf[scan]; break;  // uint8 value
+        }
+        if (etype == 0x05 && tag_len == 1 && scan + 1 < buf_size) {
+          im_status = buf[scan] | ((unsigned int)buf[scan + 1] << 8); break;
+        }
+        scan += tag_len;
+        if (etype <= 0x07) scan += (1u << (etype & 0x03));
+        else if (etype >= 0x0C && etype <= 0x13) break;  // strings: stop
+        else if (etype == 0x0A) scan += 4;
+        else if (etype == 0x0B) scan += 8;
+      }
+      if (im_status > 0) {
+        status_code = (status_code << 8) | (im_status & 0xFF);
+      }
+    }
+
     state_count++;
     state_sequence = (unsigned int *)ck_realloc(state_sequence, state_count * sizeof(unsigned int));
     state_sequence[state_count - 1] = status_code;
