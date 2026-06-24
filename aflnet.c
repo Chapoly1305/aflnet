@@ -427,6 +427,24 @@ region_t* extract_requests_SNMP(unsigned char* buf, unsigned int buf_size, unsig
 }
 
 
+// Raw/blind parser: treat the entire buffer as a single opaque region.
+// No message framing, no state extraction — pure byte-level fuzzing.
+region_t* extract_requests_raw(unsigned char* buf, unsigned int buf_size, unsigned int* region_count_ref) {
+  region_t *regions = (region_t *)ck_alloc(sizeof(region_t));
+  regions[0].start_byte = 0;
+  regions[0].end_byte   = buf_size - 1;
+  regions[0].state_sequence = NULL;
+  regions[0].state_count   = 0;
+  *region_count_ref = 1;
+  return regions;
+}
+
+unsigned int* extract_response_codes_raw(unsigned char* buf, unsigned int buf_size, unsigned int* state_count_ref) {
+  (void)buf; (void)buf_size;
+  *state_count_ref = 0;
+  return NULL;
+}
+
 region_t* extract_requests_smtp(unsigned char* buf, unsigned int buf_size, unsigned int* region_count_ref)
 {
    char *mem;

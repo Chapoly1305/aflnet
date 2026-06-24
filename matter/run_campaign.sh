@@ -51,7 +51,6 @@ rm -f "$KVS"
 
 # Select the fuzzer binary.
 AFL_BIN="$AFLNET/afl-fuzz"
-[ -x "$AFLNET/afl-fuzz-aflnet" ] && AFL_BIN="$AFLNET/afl-fuzz-aflnet"
 [ -x "$AFL_BIN" ] || { echo "fuzzer binary '$AFL_BIN' not found/executable"; exit 1; }
 
 # AFL host-environment bypasses (the campaign host's core_pattern pipes to an
@@ -72,7 +71,7 @@ exec "$AFL_BIN" \
   -d \
   -i "$SEEDS" -o "$OUT" \
   -N "udp://127.0.0.1/$PORT" \
-  -K \
+  -P RAW -K \
   -D "$DELAY" \
   -m none -t 4000+ \
   -- "$DUT" --secured-device-port "$PORT" --KVS "$KVS"
