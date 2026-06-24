@@ -1124,11 +1124,15 @@ HANDLE_RESPONSES:
 
   if (likely_buggy && false_negative_reduction) return 0;
 
-  if (terminate_child && (child_pid > 0)) kill(child_pid, SIGTERM);
+  /* Snapshot child_pid before sending SIGTERM: a concurrent forkserver read on
+     the main path overwrites the global, causing SIGTERM to hit the forkserver
+     itself (killing the persistent DUT) instead of the forked test child. */
+  s32 term_pid = child_pid;
+  if (terminate_child && (term_pid > 0)) kill(term_pid, SIGTERM);
 
   //give the server a bit more time to gracefully terminate
   while(1) {
-    int status = kill(child_pid, 0);
+    int status = kill(term_pid, 0);
     if ((status != 0) && (errno == ESRCH)) break;
   }
 
@@ -8435,6 +8439,8 @@ static void check_crash_handling(void) {
   if (fd < 0) return;
 
   ACTF("Checking core_pattern...");
+
+  if (getenv("AFL_SKIP_CORE_PATTERN")) return;
 
   if (read(fd, &fchar, 1) == 1 && fchar == '|') {
 
