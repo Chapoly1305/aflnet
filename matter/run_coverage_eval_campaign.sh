@@ -7,21 +7,22 @@
 #   - N INDEPENDENT AFLNet instances (default 20), each with its own port,
 #     out-dir, KVS, and RNG seed — these are N independent trials, NOT one
 #     AFL -M/-S parallel campaign.
-#   - Per-instance coverage-over-time: the fuzz DUT (built with
-#     -fprofile-instr-generate) periodically dumps .profraw files from the
-#     SIGTERM handler (AppMain.cpp).  The sampler merges them into cumulative
-#     snapshot-<elapsed>s.profdata files.
+#   - Per-instance coverage-over-time (ProFuzzBench method): every SKIPCOUNT
+#     seeds, replay the entire queue through a separate coverage DUT
+#     (profgen-only, graceful SIGTERM flush), merge profraw into cumulative
+#     snapshot-<elapsed>s.profdata.
 #   - Post-run aggregation via aggregate_coverage_over_time.py: median/IQR curve
 #     across all instances → coverage_over_time.csv + .png.
 #
-# One DUT binary required (built relative to REPO_ROOT):
-#   out/afl-dut-cov/chip-all-clusters-app   fuzz DUT (trace-pc-guard + profgen)
+# Two DUT binaries required (built relative to REPO_ROOT):
+#   out/afl-dut-cov/chip-all-clusters-app         fuzz DUT (trace-pc-guard + ASAN)
+#   out/afl-dut-replay-cov/chip-all-clusters-app   coverage DUT (profgen only)
 #
 # Usage:
 #   run_coverage_eval_campaign.sh [--instances N] [--max-total-time SEC]
-#                                 [--interval SEC] [--base-port N]
+#                                 [--skipcount N] [--base-port N]
 #                                 [--seeds KIND] [--seed-limit N]
-#                                 [--fuzz-dut PATH]
+#                                 [--fuzz-dut PATH] [--cov-dut PATH]
 #                                 [--out-dir DIR] [--no-aggregate]
 #
 # Examples:
@@ -38,7 +39,7 @@ DASHBOARD="${REPO_ROOT}/examples/fuzzers/eclipsefuzz/stateful/tools/generate_cov
 
 INSTANCES=20
 MAX_TOTAL_TIME=28800
-INTERVAL=1800
+SKIPCOUNT=5
 BASE_PORT=5560
 SEEDS_KIND="both"
 SEED_LIMIT=0
@@ -51,7 +52,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --instances)       INSTANCES="$2";       shift 2 ;;
     --max-total-time)  MAX_TOTAL_TIME="$2";  shift 2 ;;
-    --interval)        INTERVAL="$2";        shift 2 ;;
+    --skipcount)       SKIPCOUNT="$2";       shift 2 ;;
     --base-port)       BASE_PORT="$2";       shift 2 ;;
     --seeds)           SEEDS_KIND="$2";      shift 2 ;;
     --seed-limit)      SEED_LIMIT="$2";      shift 2 ;;
@@ -105,7 +106,7 @@ esac
 NUM_CORES="$(nproc 2>/dev/null || echo '?')"
 mkdir -p "${OUT_DIR}"
 
-echo "[afl-eval] instances=${INSTANCES} max_total_time=${MAX_TOTAL_TIME}s interval=${INTERVAL}s"
+echo "[afl-eval] instances=${INSTANCES} max_total_time=${MAX_TOTAL_TIME}s skipcount=${SKIPCOUNT}"
 echo "[afl-eval] base_port=${BASE_PORT} seeds=${SEEDS_KIND}($(ls "${SEED_DIR}" | wc -l)) cores=${NUM_CORES}"
 echo "[afl-eval] fuzz_dut=${FUZZ_DUT}"
 echo "[afl-eval] out_dir=${OUT_DIR}"
@@ -117,7 +118,7 @@ fi
   echo "started=$(date -Iseconds)"
   echo "instances=${INSTANCES}"
   echo "max_total_time=${MAX_TOTAL_TIME}"
-  echo "snapshot_interval=${INTERVAL}"
+  echo "skipcount=${SKIPCOUNT}"
   echo "base_port=${BASE_PORT}"
   echo "seeds_kind=${SEEDS_KIND}"
   echo "fuzz_dut=${FUZZ_DUT}"
@@ -126,14 +127,14 @@ fi
 } > "${OUT_DIR}/eval-meta.txt"
 
 # ---------------------------------------------------------------------------
-# per-instance coverage sampler (ProFuzzBench replay method)
+# per-instance coverage sampler (ProFuzzBench: seed-count-driven)
 #
-# Each snapshot:
-#   1. Atomically copies the current replayable-queue/.
-#   2. Starts the coverage DUT on a dedicated port with LLVM_PROFILE_FILE set.
-#   3. Replays all queue files sequentially via UDP — coverage accumulates
-#      in the DUT's in-process counters (graceful shutdown flushes profraw).
-#   4. llvm-profdata merge → snapshot-<elapsed>s.profdata, cumulative baseline.
+# snapshot_once():
+#   1. Waits until replayable-queue/ has grown by >= SKIPCOUNT seeds since
+#      the last snapshot (or until .done appears).
+#   2. Atomically copies the queue, replays ALL seeds through the coverage
+#      DUT on a dedicated port, SIGTERMs it for graceful profraw flush.
+#   3. llvm-profdata merge → cumulative snapshot-<elapsed>s.profdata.
 # ---------------------------------------------------------------------------
 sample_instance() {
   local inst_dir="$1" start_epoch="$2" stagger="$3" cov_port="$4"
@@ -142,8 +143,9 @@ sample_instance() {
   local profraw_dir="${inst_dir}/profraw"
   local timeline="${inst_dir}/timeline.csv"
   mkdir -p "${snap_dir}" "${profraw_dir}"
-  echo "elapsed_s,snapshot,profraw_count" > "${timeline}"
+  echo "elapsed_s,snapshot,profraw_count,queue_size" > "${timeline}"
   local baseline="${inst_dir}/baseline.profdata"
+  local last_queue_size=0
 
   snapshot_once() {
     local now elapsed
@@ -151,7 +153,8 @@ sample_instance() {
 
     local replay_queue="${afl_out}/replayable-queue"
     [[ -d "${replay_queue}" ]] || return 0
-    [[ -n "$(ls -A "${replay_queue}" 2>/dev/null)" ]] || return 0
+
+    local cur_size; cur_size=$(ls "${replay_queue}" 2>/dev/null | wc -l)
 
     # Atomic copy to avoid racing AFL writes.
     local tmp_queue; tmp_queue="$(mktemp -d)"
@@ -159,25 +162,22 @@ sample_instance() {
     [[ -n "$(ls -A "${tmp_queue}")" ]] || { rm -rf "${tmp_queue}"; return 0; }
 
     local profraw_pat="${profraw_dir}/snap-${elapsed}s-%p.profraw"
-
     local kvs_dir kvs
     kvs_dir="$(mktemp -d)"
     [[ -d "${kvs_dir}" ]] || { echo "[snapshot] FATAL: mktemp -d failed" >&2; return 1; }
     kvs="${kvs_dir}/chip_kvs"
 
-    # Start coverage DUT.
+    # Start coverage DUT, replay all queue seeds.
     env LLVM_PROFILE_FILE="${profraw_pat}" \
         MATTER_FUZZ_STORAGE_DIR="${kvs_dir}" \
         MATTER_FUZZ_KVS_PATH="${kvs}" \
       "${COV_DUT}" --secured-device-port "${cov_port}" --KVS "${kvs}" \
       >"${kvs_dir}/dut-stderr.log" 2>&1 &
     local dut_pid=$!
+    sleep 1
 
-    sleep 1  # wait for DUT event loop to be ready
-
-    # Replay all queue seeds (timeout 4 min).
     timeout 240 python3 -c "
-import socket, sys, time, os
+import socket, os
 queue_dir = '${tmp_queue}'
 port = ${cov_port}
 for fn in sorted(os.listdir(queue_dir)):
@@ -194,12 +194,11 @@ for fn in sorted(os.listdir(queue_dir)):
     sock.close()
 " 2>/dev/null || true
 
-    # Graceful shutdown — SIGTERM triggers profraw flush.
     kill -TERM "${dut_pid}" 2>/dev/null || true
     wait "${dut_pid}" 2>/dev/null || true
     rm -rf "${tmp_queue}" "${kvs_dir}" 2>/dev/null || true
 
-    # Merge profraws.
+    # Merge profraws into cumulative snapshot.
     local profraws=()
     while IFS= read -r f; do profraws+=("$f"); done \
       < <(find "${profraw_dir}" -name "snap-${elapsed}s-*.profraw" -type f 2>/dev/null | sort)
@@ -214,17 +213,24 @@ for fn in sorted(os.listdir(queue_dir)):
        && [[ -s "${out}" ]]; then
       cp "${out}" "${baseline}"
       rm -f "${profraws[@]}" 2>/dev/null
-      echo "${elapsed},${out},${#profraws[@]}" >> "${timeline}"
+      echo "${elapsed},${out},${#profraws[@]},${cur_size}" >> "${timeline}"
     fi
+
+    last_queue_size="${cur_size}"
   }
 
   sleep "${stagger}"
   while [[ ! -f "${inst_dir}/.done" ]]; do
-    snapshot_once
-    local slept=0
-    while [[ "${slept}" -lt "${INTERVAL}" && ! -f "${inst_dir}/.done" ]]; do
-      sleep 5; slept=$(( slept + 5 ))
+    # Wait until queue has grown by SKIPCOUNT seeds or .done appears
+    local cur_size=0
+    while [[ ! -f "${inst_dir}/.done" ]]; do
+      cur_size=$(ls "${afl_out}/replayable-queue" 2>/dev/null | wc -l)
+      if [[ $(( cur_size - last_queue_size )) -ge "${SKIPCOUNT}" ]]; then
+        break
+      fi
+      sleep 2
     done
+    snapshot_once
   done
   snapshot_once  # final snapshot
 }
@@ -234,7 +240,7 @@ for fn in sorted(os.listdir(queue_dir)):
 # ---------------------------------------------------------------------------
 CAMPAIGN_PIDS=()
 SAMPLER_PIDS=()
-STAGGER_STEP=$(( INTERVAL / INSTANCES ))
+STAGGER_STEP=3  # seconds between sampler starts
 [[ "${STAGGER_STEP}" -lt 1 ]] && STAGGER_STEP=1
 
 for i in $(seq 1 "${INSTANCES}"); do
