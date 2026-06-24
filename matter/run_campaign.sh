@@ -63,20 +63,16 @@ export AFL_SKIP_CORE_PATTERN="${AFL_SKIP_CORE_PATTERN:-1}"
 
 # Flags:
 #   -N udp://127.0.0.1/$PORT  Matter operational UDP port
-#   -P MATTER                 Matter request/response parser
-#   -E                        state-aware mode (uses extract_response_codes_matter)
-#   -R                        region-level mutation operators
 #   -K                        send SIGTERM to terminate each forked run
 #   -D 10000                  10ms settle before sending (deferred forkserver makes
 #                             each child ready almost immediately — no re-init)
-#   -q 3 -s 3                 state/seed selection algorithms (AFLNet stateful defaults)
 #   -m none                   no memory limit (large DUT)
 #   -t 2000+                  per-run timeout, skip-timeout mode
 exec "$AFL_BIN" \
   -d \
   -i "$SEEDS" -o "$OUT" \
   -N "udp://127.0.0.1/$PORT" \
-  -P MATTER -E -R -K \
-  -D "$DELAY" -q 3 -s 3 \
+  -K \
+  -D "$DELAY" \
   -m none -t 4000+ \
   -- "$DUT" --secured-device-port "$PORT" --KVS "$KVS"
