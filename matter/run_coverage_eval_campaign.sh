@@ -209,15 +209,70 @@ for i in $(seq 1 "${INSTANCES}"); do
     timeout 10 python3 -c "
 import socket
 data = open('${seed}', 'rb').read()
-# Seeds from export_corpus_to_aflnet_seeds.py are raw Matter datagrams
-# (no AFLNet size prefix). extract_requests_matter splits multi-datagram
-# seeds; for replay we send the whole buffer — the DUT processes the
-# first datagram and responds.
+
+# Split raw seed into individual Matter datagrams (replicates
+# extract_requests_matter logic from aflnet.c).
+# Matter message: msg_hdr + payload_hdr + tlv + 16-byte MIC.
+MIC_LEN = 16
+def msg_hdr_len(buf, off):
+    if off + 8 > len(buf): return -1
+    fl = buf[off]; n = 8
+    if fl & 0x04: n += 8       # Source Node ID
+    dsiz = fl & 0x03
+    if dsiz == 1: n += 8       # Destination Node ID
+    elif dsiz == 2: n += 2      # Destination Group ID
+    return n if off + n <= len(buf) else -1
+
+def payload_hdr_len(buf, off):
+    if off + 6 > len(buf): return -1
+    fl = buf[off]; n = 6
+    if fl & 0x10: n += 2       # Vendor ID
+    if fl & 0x02: n += 4       # Ack counter
+    return n if off + n <= len(buf) else -1
+
+def tlv_skip(buf, off):
+    i = off; depth = 0
+    while True:
+        if i >= len(buf): return -1
+        ctrl = buf[i]; i += 1; elem = ctrl & 0x1F
+        if elem == 0x18:       # EndOfContainer
+            if depth == 0: return -1
+            depth -= 1; continue
+        tag_len = (ctrl >> 5) & 0x07
+        if tag_len > 5: return -1
+        if i + tag_len > len(buf): return -1
+        i += tag_len
+        if elem in (0x10, 0x11):  # Boolean (True/False): no value bytes
+            pass
+        elif elem in (0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x12, 0x13, 0x14, 0x15):
+            # Signed/unsigned integer, float, UTF-8 string
+            vlen = 1 << (elem & 0x03) if (elem & 0x0C) else (1,2,4,8)[elem & 0x03]
+            if i + vlen > len(buf): return -1
+            i += vlen
+        elif elem in (0x16, 0x17):  # Struct/Array → descend
+            depth += 1
+        elif elem == 0x19:   # Null
+            pass
+        else:                # Unknown type
+            if depth == 0: return i - off
+    return i - off
+
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.settimeout(5)
-s.sendto(data, ('127.0.0.1', ${cov_port}))
-try: s.recvfrom(4096)
-except: pass
+pos = 0
+while pos < len(data):
+    mh = msg_hdr_len(data, pos)
+    if mh < 0: break
+    ph = payload_hdr_len(data, pos + mh)
+    if ph < 0: break
+    tv = tlv_skip(data, pos + mh + ph)
+    if tv < 0: break
+    msg_end = pos + mh + ph + tv + MIC_LEN
+    if msg_end > len(data): msg_end = len(data)
+    s.sendto(data[pos:msg_end], ('127.0.0.1', ${cov_port}))
+    try: s.recvfrom(4096)
+    except: pass
+    pos = msg_end
 s.close()
 " 2>/dev/null || true
 
