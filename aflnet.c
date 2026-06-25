@@ -2008,6 +2008,7 @@ static long matter_tlv_skip(const unsigned char* buf, unsigned int off, unsigned
       unsigned int k;
       for (k = 0; k < len_field; k++) str_len |= ((unsigned long long)buf[i + k]) << (8 * k);
       i += len_field;
+      if (str_len > (unsigned long long)(size - i)) return -1;
       i += (unsigned int)str_len;
     } else if (elem_type == 0x14) {
       // null: no value bytes
