@@ -1100,9 +1100,17 @@ HANDLE_RESPONSES:
   }
 
   //wait a bit letting the server to complete its remaining task(s)
+  // Bounded settle: multi-threaded servers (e.g. Matter) may have
+  // background threads that keep writing to trace_bits, causing
+  // has_new_bits to return 2 indefinitely.  Cap at 1000 attempts
+  // (~10 ms at modern CPU speeds) to prevent a livelock.
   memset(session_virgin_bits, 255, MAP_SIZE);
-  while(1) {
-    if (has_new_bits(session_virgin_bits) != 2) break;
+  {
+    u32 settle_attempts = 0;
+    while (settle_attempts < 1000) {
+      if (has_new_bits(session_virgin_bits) != 2) break;
+      settle_attempts++;
+    }
   }
 
   close(sockfd);
