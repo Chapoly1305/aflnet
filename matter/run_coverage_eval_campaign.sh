@@ -155,173 +155,19 @@ echo "[afl-eval] fuzzing complete."
 
 # =========================================================================
 # Phase 2: Post-fuzzing coverage replay (ProFuzzBench method)
+# Delegated to phase2_parallel.py: replays each instance's replayable-queue
+# through the profgen cov DUT (parallel workers) into cumulative
+# snapshot-<elapsed>s.profdata files (elapsed = seed_mtime - fuzzer_stats
+# start_time). Single source of Phase-2 logic, shared with manual re-runs.
 # =========================================================================
-echo "[afl-eval] starting coverage replay (SKIPCOUNT=${SKIPCOUNT})..."
-
-for i in $(seq 1 "${INSTANCES}"); do
-  idx="$(printf '%02d' "${i}")"
-  inst_dir="${OUT_DIR}/instance-${idx}"
-  afl_out="${inst_dir}/afl-out"
-  cov_port=$(( BASE_PORT + 200 + i - 1 ))
-  profraw_dir="${inst_dir}/profraw"
-  snap_dir="${inst_dir}/snapshots"
-  timeline="${inst_dir}/timeline.csv"
-  mkdir -p "${profraw_dir}" "${snap_dir}"
-  echo "elapsed_s,snapshot,profraw_count,seed_count" > "${timeline}"
-  baseline="${inst_dir}/baseline.profdata"; rm -f "${baseline}"
-
-  replay_queue="${afl_out}/replayable-queue"
-  [[ -d "${replay_queue}" ]] || { echo "[afl-eval] no queue for instance-${idx}, skip"; continue; }
-
-  # Collect seeds in two groups (match ProFuzzBench):
-  #   Group 1: initial corpus seeds (contain 'orig:' in name)
-  #   Group 2: discovered seeds (everything else)
-  # Both groups sorted by file modification time.
-  local initial_seeds=() discovered_seeds=()
-  while IFS= read -r ts seed; do
-    if [[ "$(basename "${seed}")" == *"orig:"* ]]; then
-      initial_seeds+=("${seed}")
-    else
-      discovered_seeds+=("${seed}")
-    fi
-  done < <(find "${replay_queue}" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | cut -d' ' -f2-)
-  total_seeds=$(( ${#initial_seeds[@]} + ${#discovered_seeds[@]} ))
-  echo "[afl-eval] instance-${idx}: ${#initial_seeds[@]} initial + ${#discovered_seeds[@]} discovered = ${total_seeds} seeds"
-
-  count=0; accum_profraws=()
-  process_batch() {
-    local seed="$1" is_initial="$2" is_last="$3"
-    count=$((count + 1))
-
-    # Use seed file mtime (match ProFuzzBench's stat -c %Y).
-    local seed_ts; seed_ts=$(stat -c %Y "${seed}" 2>/dev/null || echo 0)
-
-    kvs_dir="$(mktemp -d)"; kvs="${kvs_dir}/chip_kvs"
-    local profraw="${profraw_dir}/seed-${count}-%p.profraw"
-
-    env LLVM_PROFILE_FILE="${profraw}" \
-        MATTER_FUZZ_STORAGE_DIR="${kvs_dir}" MATTER_FUZZ_KVS_PATH="${kvs}" \
-      "${COV_DUT}" --secured-device-port "${cov_port}" --KVS "${kvs}" \
-      >"${kvs_dir}/dut-stderr.log" 2>&1 &
-    local dut_pid=$!
-    sleep 1
-
-    timeout 10 python3 -c "
-import socket
-data = open('${seed}', 'rb').read()
-MIC_LEN = 16
-def msg_hdr_len(buf, off):
-    if off + 8 > len(buf): return -1
-    fl = buf[off]; n = 8
-    if fl & 0x04: n += 8
-    dsiz = fl & 0x03
-    if dsiz == 1: n += 8
-    elif dsiz == 2: n += 2
-    return n if off + n <= len(buf) else -1
-def payload_hdr_len(buf, off):
-    if off + 6 > len(buf): return -1
-    fl = buf[off]; n = 6
-    if fl & 0x10: n += 2
-    if fl & 0x02: n += 4
-    return n if off + n <= len(buf) else -1
-def tlv_skip(buf, off):
-    i = off; depth = 0
-    TAGLEN = (0, 1, 2, 4, 2, 4, 6, 8)
-    while True:                          # do-while (depth > 0) in C
-        if i >= len(buf): return -1
-        ctrl = buf[i]; i += 1; elem = ctrl & 0x1F
-        if elem == 0x18:                 # EndOfContainer
-            depth -= 1
-            if depth <= 0: break         # outermost container closed
-            continue
-        tl = TAGLEN[(ctrl >> 5) & 0x07]
-        if i + tl > len(buf): return -1
-        i += tl
-        if elem <= 0x07:                 # signed/unsigned int
-            i += 1 << (elem & 0x03)
-        elif elem in (0x08, 0x09): pass  # boolean
-        elif elem == 0x0A: i += 4        # float32
-        elif elem == 0x0B: i += 8        # double
-        elif 0x0C <= elem <= 0x13:       # UTF8/byte string
-            lf = 1 << ((elem - 0x0C) & 0x03)
-            if i + lf > len(buf): return -1
-            slen = int.from_bytes(buf[i:i+lf], 'little')
-            i += lf + slen
-        elif elem == 0x14: pass          # null
-        elif 0x15 <= elem <= 0x17:       # struct/list/array
-            depth += 1
-        else: return -1
-        if i > len(buf): return -1
-    return i - off
-
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-s.settimeout(5)
-pos = 0
-while pos < len(data):
-    mh = msg_hdr_len(data, pos)
-    if mh < 0: break
-    ph = payload_hdr_len(data, pos + mh)
-    if ph < 0: break
-    tv = tlv_skip(data, pos + mh + ph)
-    if tv < 0: break
-    msg_end = pos + mh + ph + tv + MIC_LEN
-    if msg_end > len(data): msg_end = len(data)
-    s.sendto(data[pos:msg_end], ('127.0.0.1', ${cov_port}))
-    try: s.recvfrom(4096)
-    except: pass
-    pos = msg_end
-s.close()
-" 2>/dev/null || true
-
-    kill -TERM "${dut_pid}" 2>/dev/null || true
-    wait "${dut_pid}" 2>/dev/null || true
-    rm -rf "${kvs_dir}" 2>/dev/null || true
-
-    local pf; pf=$(find "${profraw_dir}" -name "seed-${count}-*.profraw" -type f 2>/dev/null | head -1)
-    [[ -n "${pf}" ]] && accum_profraws+=("${pf}")
-
-    # Snapshot: initial seeds → every seed; discovered → SKIPCOUNT; last → always.
-    if [[ "${is_initial}" -eq 0 && $((count % SKIPCOUNT)) -ne 0 && "${is_last}" -ne 1 ]]; then
-      return
-    fi
-    [[ "${#accum_profraws[@]}" -eq 0 ]] && return
-
-    local merge_args=()
-    [[ -f "${baseline}" ]] && merge_args+=("${baseline}")
-    merge_args+=("${accum_profraws[@]}")
-
-    local out="${snap_dir}/snapshot-${seed_ts}s.profdata"
-    if llvm-profdata merge --failure-mode=warn "${merge_args[@]}" -o "${out}" 2>/dev/null \
-       && [[ -s "${out}" ]]; then
-      cp "${out}" "${baseline}"
-      rm -f "${accum_profraws[@]}" 2>/dev/null
-      echo "${seed_ts},${out},${#accum_profraws[@]},${count}" >> "${timeline}"
-    fi
-    accum_profraws=()
-  }
-
-  # Phase 2a: replay initial corpus seeds first
-  for seed in "${initial_seeds[@]}"; do
-    process_batch "${seed}" 1 0
-  done
-
-  # Phase 2b: replay discovered seeds
-  local disc_total="${#discovered_seeds[@]}"
-  local disc_idx=0
-  for seed in "${discovered_seeds[@]}"; do
-    disc_idx=$((disc_idx + 1))
-    local is_last=0; [[ "${disc_idx}" -eq "${disc_total}" && "${#initial_seeds[@]}" -eq 0 ]] && is_last=1
-    process_batch "${seed}" 0 "${is_last}"
-  done
-
-  # Final snapshot for the last seed if step > 1 (match ProFuzzBench lines 77-87)
-  if [[ "${SKIPCOUNT}" -gt 1 && "${#accum_profraws[@]}" -gt 0 ]]; then
-    process_batch "${discovered_seeds[-1]:-${initial_seeds[-1]}}" 0 1
-  fi
-
-  echo "[afl-eval] instance-${idx}: ${total_seeds} seeds, $(wc -l < "${timeline}") snapshots"
-done &  # process instances in parallel for Phase 2
-wait
+echo "[afl-eval] starting coverage replay via phase2_parallel.py..."
+PHASE2_PY="${MATTER_DIR}/phase2_parallel.py"
+if [[ -f "${PHASE2_PY}" ]]; then
+  python3 "${PHASE2_PY}" --eval-dir "${OUT_DIR}" --cov-dut "${COV_DUT}" \
+    || echo "[afl-eval] phase2_parallel.py failed (re-run: python3 ${PHASE2_PY} --eval-dir ${OUT_DIR})" >&2
+else
+  echo "[afl-eval] phase2_parallel.py not found at ${PHASE2_PY}; skipping replay" >&2
+fi
 
 echo "ended=$(date -Iseconds)" >> "${OUT_DIR}/eval-meta.txt"
 echo "[afl-eval] coverage replay complete."
