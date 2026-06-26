@@ -19,6 +19,31 @@ from pathlib import Path
 
 MIC = 16
 
+def split_aflnet(data):
+    """Split an AFLNet replayable-queue file into its constituent datagrams.
+
+    AFLNet stores each request region as a length-prefixed record:
+        [uint32 little-endian length][length bytes of message] ...
+    repeated until EOF. This framing MUST be stripped before sending — the
+    DUT expects raw Matter datagrams. Feeding the framed bytes straight to a
+    Matter-message splitter (split_msgs) misreads the 4-byte length as a
+    message header and yields garbage, so the DUT drops everything and only
+    process-startup coverage is recorded (the bug that made every replay look
+    like ~9% / startup-only). Returns [] if the file is not cleanly framed, so
+    the caller can fall back to split_msgs for raw (non-AFLNet) inputs.
+    """
+    out = []
+    o = 0
+    n = len(data)
+    while o + 4 <= n:
+        ln = int.from_bytes(data[o:o+4], "little")
+        o += 4
+        if ln <= 0 or o + ln > n:
+            return []  # not length-framed (or truncated) -> let caller fall back
+        out.append(data[o:o+ln])
+        o += ln
+    return out if o == n else []
+
 def split_msgs(data):
     def mh(b, o):
         if o+8 > len(b): return -1
@@ -101,11 +126,14 @@ def _replay(task):
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
     except Exception:
         shutil.rmtree(kvs, ignore_errors=True); return (idx, False)
-    time.sleep(1.0)
+    time.sleep(1.5)  # let the IM/session layer come up, not just the UDP bind
     try:
         data = open(seed, "rb").read()
+        # replayable-queue entries are AFLNet length-framed; strip the framing.
+        # Fall back to the Matter-message splitter only for raw (unframed) inputs.
+        msgs = split_aflnet(data) or split_msgs(data)
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(0.3)
-        for msg in split_msgs(data):
+        for msg in msgs:
             try:
                 s.sendto(msg, ("127.0.0.1", _PORT))
                 try: s.recvfrom(4096)
