@@ -26,6 +26,21 @@ set -euo pipefail
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 AFLNET_DIR="${REPO_ROOT}/examples/fuzzers/aflnet"
+
+# Record the git commit (and clean/dirty state) of a repo or submodule into the
+# eval-meta block so a run can be reproduced from the exact tree state.
+git_provenance() {
+  local dir="$1" label="$2" sha
+  command -v git >/dev/null 2>&1 || return 0
+  git -C "${dir}" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  sha="$(git -C "${dir}" rev-parse HEAD 2>/dev/null || echo unknown)"
+  echo "${label}_git_commit=${sha}"
+  if [[ -n "$(git -C "${dir}" status --porcelain 2>/dev/null)" ]]; then
+    echo "${label}_git_status=dirty"
+  else
+    echo "${label}_git_status=clean"
+  fi
+}
 MATTER_DIR="${AFLNET_DIR}/matter"
 RUNNER="${MATTER_DIR}/run_campaign.sh"
 AGGREGATOR="${REPO_ROOT}/examples/fuzzers/eclipsefuzz/stateful/tools/aggregate_coverage_over_time.py"
@@ -103,6 +118,8 @@ echo "[afl-eval] out_dir=${OUT_DIR}"
   echo "base_port=${BASE_PORT}"; echo "seeds_kind=${SEEDS_KIND}"
   echo "fuzz_dut=${FUZZ_DUT}"; echo "coverage_binary=${COV_DUT}"
   echo "cores=${NUM_CORES}"
+  git_provenance "${REPO_ROOT}" eclipsefuzz
+  git_provenance "${AFLNET_DIR}" aflnet
 } > "${OUT_DIR}/eval-meta.txt"
 
 # =========================================================================
