@@ -394,7 +394,7 @@ u8 state_aware_mode = 0;
 u8 region_level_mutation = 0;
 u8 state_selection_algo = ROUND_ROBIN, seed_selection_algo = RANDOM_SELECTION;
 u8 feedback_type = CODE_FEEDBACK;   /* Select interesting seeds based on code feedback */
-u8 seed_schedule_type = QUEUE_SCHEDULE; /* Choose next seeds based on seed queue (coverage) */
+u8 seed_schedule_type = IPSM_SCHEDULE; /* Choose next seeds based on state machine */
 u8 code_aware_schedule = 0;
 u8 false_negative_reduction = 0;
 

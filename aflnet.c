@@ -2063,6 +2063,7 @@ unsigned int* extract_response_codes_matter(unsigned char* buf, unsigned int buf
   unsigned int pos = 0;
 
 #define MATTER_MAX_STATES 4096
+#define MATTER_NO_STATUS  0x100  /* sentinel: response carried no decodable IM status */
   state_count++;
   state_sequence = (unsigned int *)ck_realloc(state_sequence, state_count * sizeof(unsigned int));
   state_sequence[state_count - 1] = 0; // initial status code
@@ -2078,7 +2079,9 @@ unsigned int* extract_response_codes_matter(unsigned char* buf, unsigned int buf
     unsigned char opcode   = buf[ph_off + 1];
     unsigned int pid_off   = ph_off + 4 + ((ex_flags & 0x10) ? 2 : 0);
     unsigned int protocol_id = (unsigned int)buf[pid_off] | ((unsigned int)buf[pid_off + 1] << 8);
-    unsigned int status_code = ((protocol_id & 0xff) << 8) | opcode;
+    // State feedback is the IM status code ONLY — never opcode/protocol, so the
+    // baseline does not gain message-type state granularity beyond the status.
+    unsigned int status_code = MATTER_NO_STATUS;
 
     // For IM responses, extract the application-level status from the TLV payload.
     // Each response type has a specific TLV structure per 4.11 (Message Definitions)
@@ -2185,8 +2188,9 @@ unsigned int* extract_response_codes_matter(unsigned char* buf, unsigned int buf
       }
     }
     if (found) {
-      status_code = (status_code << 8) | (im_status & 0xFF);
-    }state_count++;
+      status_code = im_status & 0xFF;
+    }
+    state_count++;
     state_sequence = (unsigned int *)ck_realloc(state_sequence, state_count * sizeof(unsigned int));
     state_sequence[state_count - 1] = status_code;
 
@@ -2205,6 +2209,7 @@ unsigned int* extract_response_codes_matter(unsigned char* buf, unsigned int buf
   }
 
 #undef MATTER_MAX_STATES
+#undef MATTER_NO_STATUS
   *state_count_ref = state_count;
   return state_sequence;
 }

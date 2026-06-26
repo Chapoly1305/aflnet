@@ -62,19 +62,20 @@ int main(int argc, char ** argv)
         }
 
         /* Treat the same bytes as a response and show the derived state codes.
-         * (A real response has no MIC tail, so the trailing 16 zero bytes will
-         * be parsed as a second, malformed message and stop the scan — we only
-         * assert the first real status code is the IM ReadRequest opcode.) */
+         * State feedback is the IM status code ONLY (never opcode/protocol). A
+         * ReadRequest carries no StatusIB, so the decoder yields the no-status
+         * sentinel 0x100 rather than any opcode-derived value. */
         unsigned int state_count = 0;
         unsigned int * states = extract_response_codes_matter(buf, size, &state_count);
         printf("extract_response_codes_matter -> %u state(s):", state_count);
         for (unsigned int i = 0; i < state_count; i++) printf(" 0x%04x", states[i]);
         printf("\n");
-        /* state[0] is the seeded 0; state[1] should be (IM<<8)|opcode = 0x0102. */
-        if (state_count >= 2 && states[1] == ((0x01 << 8) | 0x02)) {
-            printf("  OK: first parsed status 0x%04x = IM/ReadRequest\n", states[1]);
+        /* state[0] is the seeded 0; state[1] is the no-status sentinel 0x100
+         * (no IM status in a request) — must NOT encode the opcode/protocol. */
+        if (state_count >= 2 && states[1] == 0x100) {
+            printf("  OK: first parsed state 0x%04x = no-status sentinel\n", states[1]);
         } else {
-            printf("  FAIL: expected first status 0x0102 (IM/ReadRequest)\n");
+            printf("  FAIL: expected first state 0x100 (no-status sentinel)\n");
             failures++;
         }
 

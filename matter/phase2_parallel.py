@@ -45,6 +45,11 @@ def split_aflnet(data):
     return out if o == n else []
 
 def split_msgs(data):
+    # Coverage-replay helper ONLY (post-hoc measurement, not the fuzzing path):
+    # a raw stateful seed packs several Matter messages into one blob, so to
+    # replay it faithfully we must cut it back into individual datagrams.
+    # Walks header lengths + TLV element lengths to find message boundaries;
+    # it reads NO TLV tag values, so it does not enrich fuzzing.
     def mh(b, o):
         if o+8 > len(b): return -1
         fl = b[o]; n = 8
@@ -130,7 +135,8 @@ def _replay(task):
     try:
         data = open(seed, "rb").read()
         # replayable-queue entries are AFLNet length-framed; strip the framing.
-        # Fall back to the Matter-message splitter only for raw (unframed) inputs.
+        # Fall back to the Matter-message splitter only for raw (unframed) inputs
+        # such as packed multi-message stateful seeds.
         msgs = split_aflnet(data) or split_msgs(data)
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(0.3)
         for msg in msgs:
