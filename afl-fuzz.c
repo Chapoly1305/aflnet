@@ -9111,9 +9111,6 @@ int main(int argc, char** argv) {
         }else if (!strcmp(optarg, "MATTER")) {
           extract_requests = &extract_requests_matter;
           extract_response_codes = &extract_response_codes_matter;
-        }else if (!strcmp(optarg, "RAW")) {
-          extract_requests = &extract_requests_raw;
-          extract_response_codes = &extract_response_codes_raw;
         } else {
           FATAL("%s protocol is not supported yet!", optarg);
         }
