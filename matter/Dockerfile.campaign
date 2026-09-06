@@ -1,0 +1,65 @@
+# AFLNet Matter campaign runtime image (headless, one container per instance).
+#
+# Created: 2026-09-06
+# Purpose: run the AFLNet baseline for the cross-fuzzer benchmark at high
+#          concurrency without host port bookkeeping. Each container owns its
+#          network namespace, so every instance binds the SAME port on its own
+#          loopback -- see run_docker_campaign.sh --network none.
+# Retention: PERMANENT (benchmark pipeline step; paired with build_campaign_image.sh)
+#
+# Unlike Dockerfile.aflnet (which only proves AFLNet compiles), this carries the
+# whole runtime: afl-fuzz, both DUT binaries, the frozen seed corpus, and the
+# Phase-2 replay tooling. Its build context is staged by build_campaign_image.sh
+# -- do not `docker build` this directory directly.
+FROM ubuntu:24.04
+
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      libglib2.0-0 libmount1 libblkid1 libselinux1 libffi8 libpcre2-8-0 \
+      libstdc++6 libgcc-s1 zlib1g ca-certificates python3 \
+      libcgraph6 libcdt5 libcap2 llvm-20 && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# AFLNet driver + helpers (built on the host with the -P MATTER parser).
+COPY aflnet/ /opt/aflnet/
+# DUT binaries.
+#   fuzz = trace-pc-guard (AFL bitmap) + ASAN + deferred forkserver + LLVM
+#          source coverage in CONTINUOUS mode. Continuous mode is what makes
+#          live coverage possible at all here: AFL runs every input in a forked
+#          child and kills it, so a normal profgen build writes nothing: the
+#          counters must be mmap'd into the .profraw instead. Build it with
+#          use_coverage=true matter_fuzz_continuous_coverage=true.
+#   cov  = profgen only; used solely by the Phase-2 replay fallback.
+COPY chip-all-clusters-app-fuzz /opt/fuzzer/chip-all-clusters-app-fuzz
+COPY chip-all-clusters-app-cov  /opt/fuzzer/chip-all-clusters-app-cov
+# Frozen seed corpus (exported from the EP2 corpus; .raw only).
+COPY seeds/ /opt/fuzzer/seeds/
+COPY entrypoint.sh /opt/fuzzer/entrypoint.sh
+# Live coverage sampler: EP2's own snapshotter, run with --continuous.
+COPY profraw_snapshotter.py /opt/fuzzer/profraw_snapshotter.py
+# Phase-2 queue replay: fallback path only (see run_docker_campaign.sh --phase2).
+COPY phase2_parallel.py /opt/fuzzer/phase2_parallel.py
+
+RUN chmod +x /opt/aflnet/afl-fuzz /opt/fuzzer/chip-all-clusters-app-fuzz \
+             /opt/fuzzer/chip-all-clusters-app-cov /opt/fuzzer/entrypoint.sh \
+             /opt/fuzzer/phase2_parallel.py /opt/fuzzer/profraw_snapshotter.py
+
+# AFL host-environment checks that cannot pass inside an unprivileged container:
+#   core_pattern is a host sysctl; cpufreq governor is not visible; CPU affinity
+#   binding fights the container's cpuset.
+ENV AFL_SKIP_CPUFREQ=1 \
+    AFL_SKIP_CORE_PATTERN=1 \
+    AFL_NO_AFFINITY=1 \
+    AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 \
+    AFL_SKIP_CRASHES=1
+# AFL requires abort_on_error=1 whenever ASAN_OPTIONS is set at all
+# (afl-fuzz.c:check_asan_opts aborts otherwise): a crash must raise a
+# signal for AFL to see it. Do NOT copy EP2's abort_on_error=0 here.
+ENV ASAN_OPTIONS=abort_on_error=1:symbolize=0:detect_leaks=0:allocator_may_return_null=1
+ENV DEBUGINFOD_URLS=""
+ENV AFLNET=/opt/aflnet AFL_PATH=/opt/aflnet PATH="/opt/aflnet:${PATH}"
+# Every container has its own netns, so this port never collides.
+ENV FUZZ_PORT=5560 DELAY_US=20000 FUZZ_SECONDS=604800 SNAPSHOT_INTERVAL=1800
+
+WORKDIR /opt/fuzzer
+ENTRYPOINT ["/opt/fuzzer/entrypoint.sh"]

@@ -10,8 +10,23 @@ order) stays sequential.
   elapsed = seed_mtime - fuzzer_stats:start_time   (relative seconds; the
             aggregator reads the filename number as elapsed directly)
 
-Usage: phase2_parallel.py --eval-dir DIR [--workers 20] [--snapshots 220]
-                          [--cov-dut PATH] [--base-port 5800]
+Two bucketing modes decide WHEN a cumulative snapshot is emitted:
+
+  --interval SEC  (default 1800)  fixed wall-clock windows. Emits one snapshot
+      per window at its right edge (1800s, 3600s, ...) for the whole campaign,
+      including windows in which AFL found nothing (the cumulative profile is
+      simply carried forward). This is what makes the curve directly comparable
+      to EP2, whose profraw_snapshotter.py samples every 1800s.
+  --interval 0    legacy behaviour: ~--snapshots buckets of equal SEED COUNT,
+      so the x-axis spacing follows discovery rate, not the clock.
+
+Created: 2026-06-26 (interval mode added 2026-09-06)
+Purpose: AFLNet/ChatAFL Phase-2 coverage replay for the cross-fuzzer benchmark;
+         interval mode added so the baseline curve matches EP2 sampling.
+Retention: PERMANENT (benchmark pipeline step)
+
+Usage: phase2_parallel.py --eval-dir DIR [--workers 20] [--interval 1800]
+                          [--snapshots 220] [--cov-dut PATH] [--base-port 5800]
 """
 import argparse, glob, os, shutil, signal, socket, subprocess, sys, tempfile, time
 import multiprocessing as mp
@@ -183,7 +198,24 @@ def start_time_for(afl_out):
     fts = [os.path.getmtime(f) for f in glob.glob(os.path.join(q, "id:*"))]
     return int(min(fts)) if fts else 0
 
-def process_instance(inst_dir, cov_dut, profdata_tool, workers, base_port, n_snapshots):
+def duration_for(afl_out, start, seeds):
+    """Campaign wall-clock length: fuzzer_stats last_update - start_time, with
+    the newest queue entry as fallback. Bounds how many fixed windows exist."""
+    fs = os.path.join(afl_out, "fuzzer_stats")
+    if os.path.isfile(fs):
+        for line in open(fs):
+            if line.startswith("last_update"):
+                try:
+                    d = int(line.split(":", 1)[1].strip()) - start
+                    if d > 0:
+                        return d
+                except Exception:
+                    pass
+    return max((int(os.path.getmtime(s)) - start for s in seeds), default=0)
+
+
+def process_instance(inst_dir, cov_dut, profdata_tool, workers, base_port, n_snapshots,
+                     interval=1800):
     afl_out = os.path.join(inst_dir, "afl-out")
     queue = os.path.join(afl_out, "replayable-queue")
     if not os.path.isdir(queue):
@@ -213,32 +245,53 @@ def process_instance(inst_dir, cov_dut, profdata_tool, workers, base_port, n_sna
                       f"({done_ok} ok) {el:.0f}s", flush=True)
 
     # Sequential cumulative merge in mtime order -> snapshots.
-    step = max(1, len(seeds) // n_snapshots)
+    elapsed_of = [max(0, int(os.path.getmtime(s)) - start) for s in seeds]
+    last = len(seeds) - 1
+    if interval > 0:
+        # Fixed wall-clock windows, labelled by their right edge (EP2 cadence).
+        n_windows = max(1, -(-duration_for(afl_out, start, seeds) // interval))
+        seeds_in = {}
+        for i, e in enumerate(elapsed_of):
+            seeds_in.setdefault(min(e // interval, n_windows - 1), []).append(i)
+        plan = [((w + 1) * interval, seeds_in.get(w, [])) for w in range(n_windows)]
+    else:
+        step = max(1, len(seeds) // n_snapshots)
+        plan, cur = [], []
+        for i in range(len(seeds)):
+            cur.append(i)
+            if (i + 1) % step == 0 or i == last:
+                plan.append((elapsed_of[i], cur)); cur = []
+
     with open(timeline, "w") as tl:
         tl.write("elapsed_s,snapshot,profraw_count,seed_count\n")
     baseline = None
-    accum = []
-    last = len(seeds) - 1
     n_snap = 0
-    for i, s in enumerate(seeds):
-        pd = os.path.join(pd_dir, f"s-{i}.profdata")
-        if os.path.exists(pd) and os.path.getsize(pd) > 0:
-            accum.append(pd)
-        if (i + 1) % step == 0 or i == last:
-            if not accum and baseline is None:
-                continue
-            elapsed = max(0, int(os.path.getmtime(s)) - start)
-            out = os.path.join(snap_dir, f"snapshot-{elapsed}s.profdata")
+    seen = 0
+    for elapsed, idxs in plan:
+        accum = []
+        for i in idxs:
+            pd = os.path.join(pd_dir, f"s-{i}.profdata")
+            if os.path.exists(pd) and os.path.getsize(pd) > 0:
+                accum.append(pd)
+        seen += len(idxs)
+        if not accum and baseline is None:
+            continue  # nothing to report yet
+        out = os.path.join(snap_dir, f"snapshot-{elapsed}s.profdata")
+        if not accum:
+            # Empty window: carry the cumulative profile forward so the curve
+            # has a point every `interval` seconds, exactly like EP2's.
+            shutil.copy(baseline, out)
+        else:
             args = ([baseline] if baseline else []) + accum
             r = subprocess.run([profdata_tool, "merge", "--failure-mode=warn", *args, "-o", out],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if r.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 0:
-                baseline = out + ".base"
-                shutil.copy(out, baseline)
-                with open(timeline, "a") as tl:
-                    tl.write(f"{elapsed},{out},{len(accum)},{i+1}\n")
-                accum = []
-                n_snap += 1
+            if not (r.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 0):
+                continue
+        baseline = out + ".base"
+        shutil.copy(out, baseline)
+        with open(timeline, "a") as tl:
+            tl.write(f"{elapsed},{out},{len(accum)},{seen}\n")
+        n_snap += 1
     # tidy: drop per-seed profdatas + baseline copies (snapshots are what matter)
     shutil.rmtree(pd_dir, ignore_errors=True)
     for b in glob.glob(os.path.join(snap_dir, "*.base")):
@@ -249,7 +302,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--eval-dir", required=True)
     ap.add_argument("--workers", type=int, default=20)
-    ap.add_argument("--snapshots", type=int, default=220, help="approx snapshots per instance")
+    ap.add_argument("--snapshots", type=int, default=220,
+                    help="legacy seed-count bucketing: approx snapshots per instance (--interval 0)")
+    ap.add_argument("--interval", type=int, default=1800,
+                    help="fixed wall-clock snapshot window in seconds (default 1800 = EP2 cadence); "
+                         "0 selects the legacy seed-count bucketing")
     ap.add_argument("--cov-dut", default=None)
     ap.add_argument("--base-port", type=int, default=5800)
     ap.add_argument("--only", default=None, help="process only this instance (e.g. instance-01)")
@@ -260,11 +317,21 @@ def main():
     cov_dut = args.cov_dut or meta_get(meta, "coverage_binary")
     if not cov_dut or not os.path.isfile(cov_dut):
         sys.exit(f"[p2par] cov DUT not found: {cov_dut}")
-    repo = Path(__file__).resolve().parents[4]
-    profdata_tool = shutil.which("llvm-profdata") or str(
-        repo / ".environment/cipd/packages/pigweed/bin/llvm-profdata")
-    if not (os.path.isfile(profdata_tool) or shutil.which("llvm-profdata")):
-        sys.exit("[p2par] llvm-profdata not found")
+    # Resolve llvm-profdata: PATH first (this is what the campaign container
+    # has), then the pigweed CIPD copy when running from a repo checkout. The
+    # repo-relative lookup must not assume a checkout layout -- the same file is
+    # copied to /opt/fuzzer inside the container, where parents[4] does not exist.
+    profdata_tool = shutil.which("llvm-profdata") or shutil.which("llvm-profdata-20")
+    if not profdata_tool:
+        try:
+            cand = Path(__file__).resolve().parents[4] / \
+                ".environment/cipd/packages/pigweed/bin/llvm-profdata"
+            if cand.is_file():
+                profdata_tool = str(cand)
+        except IndexError:
+            pass
+    if not profdata_tool:
+        sys.exit("[p2par] llvm-profdata not found (not on PATH, no pigweed CIPD copy)")
 
     insts = sorted(glob.glob(os.path.join(eval_dir, "instance-*")))
     if args.only:
@@ -273,7 +340,8 @@ def main():
         sys.exit(f"[p2par] no instances under {eval_dir}")
     print(f"[p2par] cov_dut={cov_dut}\n[p2par] instances={[os.path.basename(d) for d in insts]}", flush=True)
     for inst in insts:
-        process_instance(inst, cov_dut, profdata_tool, args.workers, args.base_port, args.snapshots)
+        process_instance(inst, cov_dut, profdata_tool, args.workers, args.base_port,
+                         args.snapshots, args.interval)
     print("[p2par] all instances done", flush=True)
 
 if __name__ == "__main__":
