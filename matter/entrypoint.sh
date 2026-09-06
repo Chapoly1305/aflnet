@@ -184,6 +184,13 @@ fi
 if grep -aq "No server states have been detected" "${OUT}/instance.log"; then
   fail no-server-states "AFLNet never saw a server response even after calibration (raise DELAY_US)"
 fi
+# afl_exit must be checked. 124 is our own `timeout` ending the window, which is
+# the normal path; 0 is a clean AFL exit. Anything else means AFL itself died --
+# 134 (SIGABRT) is what a 3,165-seed corpus produced at the end of the dry run --
+# and reporting that as ok let a dead 24h campaign look healthy for 90 minutes.
+if [[ "${rc}" != "124" && "${rc}" != "0" ]]; then
+  fail "afl-exit-${rc}" "afl-fuzz itself exited ${rc} (not the timeout); campaign did not run to completion"
+fi
 q=$(ls "${OUT}/afl-out/replayable-queue" 2>/dev/null | wc -l)
 [[ "${q}" -gt 0 ]] || fail empty-queue "afl-out/replayable-queue is empty -- nothing was fuzzed"
 echo "queue_entries=${q}" >> "${OUT}/run.env"
