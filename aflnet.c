@@ -2008,6 +2008,88 @@ static long matter_tlv_skip(const unsigned char* buf, unsigned int off, unsigned
 // Split a recorded sequence of concatenated Matter request datagrams into
 // per-message regions. AFLNet reads region bytes sequentially, so regions must
 // be contiguous and cover the whole buffer.
+/* ---- Matter over TCP -------------------------------------------------------
+ * Matter frames every message on TCP with a 4-byte little-endian length prefix
+ * (connectedhomeip src/transport/raw/TCP.cpp: kPacketSizeBytes = 4, and
+ * LittleEndian::Write32 on send). Splitting on that prefix means we split
+ * exactly where the DUT splits, instead of re-deriving message boundaries by
+ * parsing headers -- which a mutated buffer defeats: on the 24h UDP run a 28 KB
+ * havoc'd input was mis-split into 890 "messages" averaging 32 bytes, below the
+ * 51-byte minimum for a valid Matter message.
+ *
+ * The prefix is kept INSIDE the region, because AFLNet writes region bytes
+ * verbatim to the socket and the DUT expects the framing. That also leaves the
+ * length field itself reachable by havoc, which is a legitimate target.
+ */
+#define MATTER_TCP_PREFIX_LEN 4
+
+region_t* extract_requests_matter_tcp(unsigned char* buf, unsigned int buf_size, unsigned int* region_count_ref) {
+  unsigned int region_count = 0;
+  region_t *regions = NULL;
+  unsigned int pos = 0;
+#define MATTER_TCP_MAX_REGIONS 8192
+  while (pos + MATTER_TCP_PREFIX_LEN <= buf_size && region_count < MATTER_TCP_MAX_REGIONS) {
+    unsigned int msg_len = (unsigned int)buf[pos]
+                         | ((unsigned int)buf[pos + 1] << 8)
+                         | ((unsigned int)buf[pos + 2] << 16)
+                         | ((unsigned int)buf[pos + 3] << 24);
+    unsigned int frame_len = MATTER_TCP_PREFIX_LEN + msg_len;
+    /* A mutated length can be zero, or run past the buffer. Clamp to what is
+     * actually there so the region set still covers every byte; the DUT will
+     * reject it, which is the point. */
+    if (msg_len == 0 || frame_len < MATTER_TCP_PREFIX_LEN /* overflow */
+        || pos + frame_len > buf_size) {
+      frame_len = buf_size - pos;
+    }
+    if (frame_len == 0) break;
+    region_count++;
+    regions = (region_t *)ck_realloc(regions, region_count * sizeof(region_t));
+    regions[region_count - 1].start_byte = pos;
+    regions[region_count - 1].end_byte = pos + frame_len - 1;
+    regions[region_count - 1].state_sequence = NULL;
+    regions[region_count - 1].state_count = 0;
+    pos += frame_len;
+  }
+#undef MATTER_TCP_MAX_REGIONS
+  if ((region_count == 0) && (buf_size > 0)) {
+    regions = (region_t *)ck_realloc(regions, sizeof(region_t));
+    regions[0].start_byte = 0;
+    regions[0].end_byte = buf_size - 1;
+    regions[0].state_sequence = NULL;
+    regions[0].state_count = 0;
+    region_count = 1;
+  }
+  *region_count_ref = region_count;
+  return regions;
+}
+
+/* Responses are framed the same way. De-frame into a contiguous buffer and hand
+ * it to the UDP extractor, so the per-opcode IM status TLV descent lives in one
+ * place only. */
+unsigned int* extract_response_codes_matter_tcp(unsigned char* buf, unsigned int buf_size, unsigned int* state_count_ref) {
+  unsigned char *flat = NULL;
+  unsigned int flat_size = 0;
+  unsigned int pos = 0;
+  unsigned int *out;
+
+  if (buf_size > 0) flat = (unsigned char *)ck_alloc(buf_size);
+  while (pos + MATTER_TCP_PREFIX_LEN <= buf_size) {
+    unsigned int msg_len = (unsigned int)buf[pos]
+                         | ((unsigned int)buf[pos + 1] << 8)
+                         | ((unsigned int)buf[pos + 2] << 16)
+                         | ((unsigned int)buf[pos + 3] << 24);
+    unsigned int avail = buf_size - pos - MATTER_TCP_PREFIX_LEN;
+    if (msg_len == 0) break;
+    if (msg_len > avail) msg_len = avail;   /* truncated / mutated frame */
+    memcpy(flat + flat_size, buf + pos + MATTER_TCP_PREFIX_LEN, msg_len);
+    flat_size += msg_len;
+    pos += MATTER_TCP_PREFIX_LEN + msg_len;
+  }
+  out = extract_response_codes_matter(flat, flat_size, state_count_ref);
+  if (flat) ck_free(flat);
+  return out;
+}
+
 region_t* extract_requests_matter(unsigned char* buf, unsigned int buf_size, unsigned int* region_count_ref) {
   unsigned int region_count = 0;
   region_t *regions = NULL;
@@ -2054,9 +2136,9 @@ region_t* extract_requests_matter(unsigned char* buf, unsigned int buf_size, uns
 }
 
 // Derive the state-feedback sequence from the DUT's (plaintext) responses. Each
-// message contributes a status code = (protocolId low byte << 8) | opcode, which
-// distinguishes IM ReportData / StatusResponse / InvokeResponse / WriteResponse
-// and SecureChannel acks.
+// message contributes its IM status code (see the note inside: the state is the
+// status ONLY, never protocol/opcode). Messages carrying no decodable IM status
+// -- SecureChannel acks, for instance -- yield the MATTER_NO_STATUS sentinel.
 unsigned int* extract_response_codes_matter(unsigned char* buf, unsigned int buf_size, unsigned int* state_count_ref) {
   unsigned int *state_sequence = NULL;
   unsigned int state_count = 0;

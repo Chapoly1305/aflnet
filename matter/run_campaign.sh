@@ -45,6 +45,19 @@ PORT="${PORT:-5560}"
 # ⇒ AFLNet sees an empty response and aborts ("No server states detected"). Raise
 # it on a slower / more heavily loaded host.
 DELAY="${DELAY:-10000}"
+# Transport. udp = bare datagrams (-P MATTER); tcp = Matter's 4-byte LE
+# length-prefixed framing (-P MATTERTCP), which is AFLNet's native mode: on TCP
+# connect() only succeeds once the DUT child is accepting, so AFLNet's built-in
+# connect retry becomes a real synchronisation point and DELAY stops being a guess.
+TRANSPORT="${TRANSPORT:-udp}"
+# -W: poll timeout (ms) for the FIRST response to each message. AFLNet defaults
+# to 1 ms, which is far too tight here -- on TCP the child must accept() before
+# it can even read, and on UDP the response still has to come back inside the
+# poll window. Unlike -D this is an upper bound, not a sleep: poll() returns as
+# soon as data arrives, so raising it costs nothing when the DUT does answer.
+POLL_MS="${POLL_MS:-100}"
+if [ "$TRANSPORT" = "tcp" ]; then PROTO=MATTERTCP; NETSPEC="tcp://127.0.0.1/$PORT";
+else PROTO=MATTER; NETSPEC="udp://127.0.0.1/$PORT"; fi
 
 [ -d "$SEEDS" ] || { echo "seed dir '$SEEDS' missing — run gen_matter_seeds.py first"; exit 1; }
 rm -f "$KVS"
@@ -70,8 +83,8 @@ export AFL_SKIP_CORE_PATTERN="${AFL_SKIP_CORE_PATTERN:-1}"
 exec "$AFL_BIN" \
   -d \
   -i "$SEEDS" -o "$OUT" \
-  -N "udp://127.0.0.1/$PORT" \
-  -P MATTER -E -K \
-  -D "$DELAY" \
+  -N "$NETSPEC" \
+  -P "$PROTO" -E -K \
+  -D "$DELAY" -W "$POLL_MS" \
   -m none -t 4000+ \
   -- "$DUT" --secured-device-port "$PORT" --KVS "$KVS"

@@ -3739,7 +3739,8 @@ static void perform_dry_run(char** argv) {
 
       case FAULT_NOINST:
 
-        FATAL("No instrumentation detected");
+        useless_at_start++;
+        WARNF("No instrumentation detected for '%s', skipping.", fn);
 
       case FAULT_NOBITS:
 
@@ -9063,6 +9064,11 @@ int main(int argc, char** argv) {
         } else if (!strcmp(optarg, "FTP")) {
           extract_requests = &extract_requests_ftp;
           extract_response_codes = &extract_response_codes_ftp;
+        } else if (!strcmp(optarg, "MATTERTCP")) {
+          /* Matter over TCP: 4-byte LE length-prefixed framing. Separate from
+             MATTER so the existing UDP baseline stays bit-identical. */
+          extract_requests = &extract_requests_matter_tcp;
+          extract_response_codes = &extract_response_codes_matter_tcp;
         } else if (!strcmp(optarg, "MQTT")) {
           extract_requests = &extract_requests_mqtt;
           extract_response_codes = &extract_response_codes_mqtt;
