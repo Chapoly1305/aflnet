@@ -44,7 +44,7 @@ FUZZ_SECONDS=86400
 TRANSPORT=tcp
 DELAY_US=10000
 POLL_MS=20
-CALIBRATE=1
+CALIBRATE=0
 INTERVAL=1800
 SCOPE=clusters
 COV_MODE=live
@@ -58,7 +58,7 @@ PHASE2_WORKERS=16
 usage() { cat <<'U'
 Usage: run_docker_campaign.sh [--instances 20] [--fuzz-seconds 86400]
          [--image TAG] [--out-dir DIR] [--transport tcp|udp]
-         [--delay-us 10000] [--poll-ms 20] [--no-calibrate]
+         [--delay-us 10000] [--poll-ms 20] [--calibrate]
          [--interval 1800] [--scope clusters|sdk] [--cpus N.N]
          [--phase2] [--phase2-workers 16] [--no-coverage]
 U
@@ -72,7 +72,7 @@ while [[ $# -gt 0 ]]; do
     --delay-us)       DELAY_US="${2:?}";      shift 2 ;;
     --poll-ms)        POLL_MS="${2:?}";       shift 2 ;;
     --transport)      TRANSPORT="${2:?}";     shift 2 ;;
-    --no-calibrate)   CALIBRATE=0;            shift ;;
+    --calibrate)      CALIBRATE=1;            shift ;;
     --interval)       INTERVAL="${2:?}";      shift 2 ;;
     --scope)          SCOPE="${2:?}";         shift 2 ;;
     --cpus)           CPUS="${2:?}";          shift 2 ;;

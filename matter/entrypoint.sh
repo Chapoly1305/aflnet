@@ -48,10 +48,53 @@ else
   PROTO=MATTER;    NETSPEC="udp://127.0.0.1/${FUZZ_PORT}"
 fi
 
+# NOTE: -d lives in AFL_ALGO_FLAGS, not here. afl-fuzz hard-FATALs on a repeated
+# flag ("Multiple -d options not supported"), so nothing below may duplicate a
+# flag that AFL_ALGO_FLAGS already carries (-d -q -s -E -K -R).
+# AFL is stopped with `timeout -s INT`, and on SIGINT it does not always take the
+# DUT down with it. A surviving DUT keeps the operational port bound, so the next
+# run's DUT fails to bind, VerifyOrDie fires, and AFL reports the confusing
+# "Fork server crashed with signal 6" -- before any input, which sends you
+# looking at the seeds instead of at the port. This bit us between the settle
+# calibration and the real campaign. UDP masked it (SO_REUSEADDR); TCP does not.
+#
+# The pattern is anchored with ^: afl-fuzz's own command line ends in
+# "-- <DUT> --secured-device-port ...", so an unanchored `pkill -f` would kill
+# the fuzzer as well as any stray DUT.
+reap_dut() {
+  # Kill a stale afl-fuzz FIRST. `timeout -s INT` only sets AFL's stop_soon flag
+  # and AFL checks it between execs, so with -t 20000 it can outlive the timeout
+  # by a long way. A surviving afl-fuzz respawns its own forkserver, which
+  # re-binds the port -- so killing only the DUT lets AFL immediately put another
+  # one back. This is what made the settle calibration poison the real run.
+  pkill -f "^${AFLNET}/afl-fuzz" 2>/dev/null || true
+  for _ in $(seq 1 50); do
+    pgrep -f "^${AFLNET}/afl-fuzz" >/dev/null 2>&1 || break
+    sleep 0.2
+  done
+  pkill -9 -f "^${AFLNET}/afl-fuzz" 2>/dev/null || true
+  pkill -f "^${DUT}" 2>/dev/null || true
+  for _ in $(seq 1 50); do
+    pgrep -f "^${DUT}" >/dev/null 2>&1 || break
+    sleep 0.2
+  done
+  pkill -9 -f "^${DUT}" 2>/dev/null || true
+  # Wait for the kernel to release the listener before the next bind. Read
+  # /proc/net/tcp directly -- the runtime image has no iproute2/ss, and adding a
+  # package just for a liveness check is not worth the image surface.
+  local hexport
+  hexport=$(printf '%04X' "${FUZZ_PORT}")
+  for _ in $(seq 1 50); do
+    grep -qiE "^ *[0-9]+: [0-9A-F]+:${hexport} " /proc/net/tcp /proc/net/tcp6 2>/dev/null || break
+    sleep 0.2
+  done
+}
+
 run_afl() {  # $1=delay_us  $2=timeout_s  $3=outdir  $4=poll_ms
+  reap_dut
   rm -rf "$3" "${KVS}"; mkdir -p "$3"
-  timeout -s INT "$2" "${AFLNET}/afl-fuzz" \
-      -d -i "${SEEDS_DIR}" -o "$3" \
+  timeout -s INT -k 10 "$2" "${AFLNET}/afl-fuzz" \
+      -i "${SEEDS_DIR}" -o "$3" \
       -N "${NETSPEC}" -P "${PROTO}" \
       -D "$1" -W "$4" \
       ${AFL_ALGO_FLAGS} ${DICT_ARG} \

@@ -76,7 +76,14 @@ ENV AFLNET=/opt/aflnet AFL_PATH=/opt/aflnet PATH="/opt/aflnet:${PATH}"
 #   TEST_TIMEOUT_MS ProFuzzBench uses TEST_TIMEOUT=20000 -> -t 20000+. Our old
 #                   -t 4000+ was 5x tighter and risks scoring a slow but normal
 #                   execution as a timeout on an ASAN DUT.
-ENV FUZZ_PORT=5560 TRANSPORT=tcp DELAY_US=10000 POLL_MS=20 \
+# CALIBRATE=0 by default. ProFuzzBench hardcodes -D per target and does not
+# calibrate at runtime, so probing was already a deviation from the reference
+# methodology; worse, it can leave the 20 replicas on different (D, W) values,
+# which makes them incomparable. It also turned out to break the campaign: a
+# second afl-fuzz run inside the same container dies at forkserver startup with
+# SIGABRT, so the probe poisoned the run that followed it.
+ENV CALIBRATE=0 \
+    FUZZ_PORT=5560 TRANSPORT=tcp DELAY_US=10000 POLL_MS=20 \
     FUZZ_SECONDS=86400 SNAPSHOT_INTERVAL=1800 \
     AFL_ALGO_FLAGS="-d -q 3 -s 3 -E -K -R" \
     DICT=/opt/fuzzer/matter.dict \
