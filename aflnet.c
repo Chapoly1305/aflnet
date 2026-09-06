@@ -2033,17 +2033,36 @@ region_t* extract_requests_matter_tcp(unsigned char* buf, unsigned int buf_size,
                          | ((unsigned int)buf[pos + 1] << 8)
                          | ((unsigned int)buf[pos + 2] << 16)
                          | ((unsigned int)buf[pos + 3] << 24);
-    unsigned int frame_len = MATTER_TCP_PREFIX_LEN + msg_len;
-    /* A mutated length can be zero, or run past the buffer. Clamp to what is
-     * actually there so the region set still covers every byte; the DUT will
-     * reject it, which is the point. */
-    if (msg_len == 0 || frame_len < MATTER_TCP_PREFIX_LEN /* overflow */
-        || pos + frame_len > buf_size) {
+    /* The length field is attacker-controlled: havoc mutates it directly. Every
+     * comparison below must therefore be overflow-free.
+     *
+     * The obvious formulation -- compute frame_len = 4 + msg_len, then test
+     * `pos + frame_len > buf_size` -- is NOT. With msg_len = 0xFFFFFFF9 the sum
+     * pos + frame_len wraps to pos - 3, which is <= buf_size, so the bounds
+     * check passes; end_byte then wraps to pos - 4, and AFLNet's
+     * `end_byte - start_byte + 1` yields (u32)(-3) = 4294967293, which
+     * ck_alloc rejects with "Bad alloc request" and abort(). That killed a
+     * 20 x 24 h campaign ~36 minutes in, once havoc had had time to produce
+     * such a length.
+     *
+     * The loop condition guarantees pos + MATTER_TCP_PREFIX_LEN <= buf_size, so
+     * `avail` cannot underflow, and comparing msg_len against it never wraps. */
+    unsigned int avail = buf_size - pos - MATTER_TCP_PREFIX_LEN;
+    unsigned int frame_len;
+    if (msg_len == 0 || msg_len > avail) {
+      /* Zero-length or truncated/mutated frame: take the rest of the buffer so
+       * the region set still covers every byte; the DUT will reject it. */
       frame_len = buf_size - pos;
+    } else {
+      frame_len = MATTER_TCP_PREFIX_LEN + msg_len;
     }
     if (frame_len == 0) break;
     region_count++;
     regions = (region_t *)ck_realloc(regions, region_count * sizeof(region_t));
+    /* Invariant: regions are non-empty and non-inverted. AFLNet sizes buffers
+     * with end_byte - start_byte + 1, so an inverted region becomes a ~4 GB
+     * allocation request rather than a visible parse error. */
+    if (frame_len == 0 || pos + frame_len > buf_size) break;
     regions[region_count - 1].start_byte = pos;
     regions[region_count - 1].end_byte = pos + frame_len - 1;
     regions[region_count - 1].state_sequence = NULL;
