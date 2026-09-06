@@ -16,7 +16,7 @@ REPO_ROOT="$(cd "${AFLNET_DIR}/../../.." && pwd)"
 IMAGE_TAG="aflnet-matter-campaign:local"
 FUZZ_DUT="${REPO_ROOT}/out/afl-dut-live-cov/chip-all-clusters-app"
 COV_DUT="${REPO_ROOT}/out/afl-dut-replay-cov/chip-all-clusters-app"
-SEED_DIR="${REPO_ROOT}/out/aflnet-seeds-both-20260906/seeds"
+SEED_DIR="${REPO_ROOT}/out/aflnet-seeds-tcp-20260906"
 NO_CACHE=0
 
 usage() { cat <<'U'
@@ -41,6 +41,22 @@ command -v docker >/dev/null || { echo "ERROR: docker required" >&2; exit 1; }
 [[ -x "${COV_DUT}"  ]] || { echo "ERROR: cov DUT missing: ${COV_DUT}" >&2; exit 1; }
 [[ -x "${AFLNET_DIR}/afl-fuzz" ]] || { echo "ERROR: afl-fuzz not built: run make -C ${AFLNET_DIR}" >&2; exit 1; }
 n_seeds=$(find "${SEED_DIR}" -maxdepth 1 -name '*.raw' 2>/dev/null | wc -l)
+# Seeds must carry the framing the campaign transport expects. A TCP seed starts
+# with its own 4-byte little-endian length; a UDP seed starts with the Matter
+# message header, whose first byte is the message flags (0x00 for our exporter).
+# Mixing them is silent: AFLNet would send unframed bytes down a stream socket
+# and every run would look like an unresponsive server.
+# -print -quit, not `| head -1`: head exits after one line, find dies of SIGPIPE,
+# and under `set -o pipefail` that fails the assignment and `set -e` kills the
+# script silently. Same trap as the nm|grep -q preflight above.
+first_seed=$(find "${SEED_DIR}" -maxdepth 1 -name '*.raw' -print -quit)
+declared=$(od -An -tu4 -N4 "${first_seed}" 2>/dev/null | tr -d ' ')
+actual=$(stat -c%s "${first_seed}")
+if [[ -n "${declared}" ]] && (( declared + 4 == actual )); then
+  SEED_TRANSPORT=tcp
+else
+  SEED_TRANSPORT=udp
+fi
 [[ "${n_seeds}" -gt 0 ]] || { echo "ERROR: no .raw seeds under ${SEED_DIR}" >&2; exit 1; }
 
 # The fuzz DUT must actually be AFL-instrumented; a plain build links and runs
@@ -92,6 +108,7 @@ BUILD_ARGS=(--tag "${IMAGE_TAG}"
   --label "aflnet.afl_fuzz_sha256=$(sha "${STAGE}/aflnet/afl-fuzz")"
   --label "aflnet.seed_count=${n_seeds}"
   --label "aflnet.seed_set_sha256=${SEED_SHA}"
+  --label "aflnet.seed_transport=${SEED_TRANSPORT}"
   --label "aflnet.repo_commit=$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)")
 [[ "${NO_CACHE}" -eq 1 ]] && BUILD_ARGS+=(--no-cache)
 

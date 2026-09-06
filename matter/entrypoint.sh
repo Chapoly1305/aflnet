@@ -16,8 +16,8 @@
 # file on the interval (and must NOT prune it -- unlinking a live mapping loses
 # every later update).
 #
-# Env: FUZZ_SECONDS, FUZZ_PORT, DELAY_US, CALIBRATE=1|0, SEEDS_DIR, INSTANCE,
-#      SNAPSHOT_INTERVAL
+# Env: FUZZ_SECONDS, FUZZ_PORT, DELAY_US, POLL_MS, TRANSPORT, AFL_ALGO_FLAGS,
+#      CALIBRATE=1|0, SEEDS_DIR, INSTANCE, SNAPSHOT_INTERVAL
 set -uo pipefail
 
 OUT=/workdir/output
@@ -30,12 +30,23 @@ mkdir -p "${OUT}" "${PROFRAW_DIR}"
 
 log() { echo "[aflnet-ct $(date -u +%H:%M:%S)] $*"; }
 
-run_afl() {  # $1=delay_us  $2=timeout_s  $3=outdir
+# Transport. tcp uses Matter's 4-byte little-endian length framing, which the
+# spec mandates for stream transports (Matter 1.5 Core Spec 4.5 / 4.5.1), and
+# matches AFLNet's dominant mode -- 6 of its 7 upstream tutorials are -N tcp://.
+if [ "${TRANSPORT}" = "tcp" ]; then
+  PROTO=MATTERTCP; NETSPEC="tcp://127.0.0.1/${FUZZ_PORT}"
+else
+  PROTO=MATTER;    NETSPEC="udp://127.0.0.1/${FUZZ_PORT}"
+fi
+
+run_afl() {  # $1=delay_us  $2=timeout_s  $3=outdir  $4=poll_ms
   rm -rf "$3" "${KVS}"; mkdir -p "$3"
   timeout -s INT "$2" "${AFLNET}/afl-fuzz" \
       -d -i "${SEEDS_DIR}" -o "$3" \
-      -N "udp://127.0.0.1/${FUZZ_PORT}" \
-      -P MATTER -E -K -D "$1" -m none -t 4000+ \
+      -N "${NETSPEC}" -P "${PROTO}" \
+      -D "$1" -W "$4" \
+      ${AFL_ALGO_FLAGS} \
+      -m none -t 4000+ \
       -- "${DUT}" --secured-device-port "${FUZZ_PORT}" --KVS "${KVS}"
 }
 
@@ -45,7 +56,7 @@ run_afl() {  # $1=delay_us  $2=timeout_s  $3=outdir
 # is right on an idle host and fails outright ("No server states have been
 # detected") on a loaded one. Probe upward and keep the first value that works,
 # rather than hardcoding a number that silently kills the run.
-DELAY="${DELAY_US}"
+DELAY="${DELAY_US}"; POLL="${POLL_MS}"
 if [[ "${CALIBRATE:-1}" == "1" ]]; then
   CAL_SEEDS=/tmp/cal-seeds; rm -rf "${CAL_SEEDS}"; mkdir -p "${CAL_SEEDS}"
   find "${SEEDS_DIR}" -name '*.raw' | head -5 | xargs -I{} cp {} "${CAL_SEEDS}/"
@@ -53,22 +64,33 @@ if [[ "${CALIBRATE:-1}" == "1" ]]; then
   # throwaway profile -- otherwise the campaign's t=0 coverage already includes
   # up to four calibration passes.
   export LLVM_PROFILE_FILE=/tmp/cal_%c.profraw
-  for d in "${DELAY_US}" 50000 100000 200000; do
-    log "calibrating settle delay: -D ${d}us"
-    SEEDS_DIR="${CAL_SEEDS}" run_afl "${d}" 75 /tmp/cal-out > /tmp/cal.log 2>&1 || true
+  # -W (response poll) is the binding knob, not -D: AFLNet defaults it to 1 ms,
+  # which is too tight to catch the reply, and a too-large -D was only ever
+  # compensating for that. TCP needs a larger minimum than UDP because the
+  # forked child must accept() before it can read. Upstream raises -W the same
+  # way for its one datagram target (tutorials/tinydtls uses -W 30). Escalate
+  # the pair rather than -D alone.
+  for dw in "${DELAY_US}:${POLL_MS}" "${DELAY_US}:50" "20000:50" "50000:100"; do
+    d="${dw%%:*}"; w="${dw##*:}"
+    log "calibrating: -D ${d}us -W ${w}ms"
+    SEEDS_DIR="${CAL_SEEDS}" run_afl "${d}" 75 /tmp/cal-out "${w}" > /tmp/cal.log 2>&1 || true
     if grep -aq "PROGRAM ABORT" /tmp/cal.log; then
       log "  calibration cannot run: $(grep -a 'PROGRAM ABORT' /tmp/cal.log | head -1 | sed 's/\x1b\[[0-9;]*m//g')"
       break
     fi
     if grep -aq "No server states have been detected" /tmp/cal.log; then
-      log "  -D ${d}us REJECTED (no server states)"
+      log "  -D ${d}us -W ${w}ms REJECTED (no server states)"
     else
-      DELAY="${d}"; log "  -D ${d}us OK -> using it"; break
+      DELAY="${d}"; POLL="${w}"; log "  -D ${d}us -W ${w}ms OK -> using it"; break
     fi
   done
   rm -rf /tmp/cal-out "${CAL_SEEDS}" /tmp/cal_*.profraw
 fi
 echo "delay_us=${DELAY}"   >> "${OUT}/run.env"
+echo "poll_ms=${POLL}"     >> "${OUT}/run.env"
+echo "transport=${TRANSPORT}" >> "${OUT}/run.env"
+echo "protocol=${PROTO}"   >> "${OUT}/run.env"
+echo "afl_algo_flags=${AFL_ALGO_FLAGS}" >> "${OUT}/run.env"
 echo "fuzz_port=${FUZZ_PORT}" >> "${OUT}/run.env"
 echo "instance=${INSTANCE}"   >> "${OUT}/run.env"
 echo "seeds=$(find "${SEEDS_DIR}" -name '*.raw' | wc -l)" >> "${OUT}/run.env"
@@ -89,8 +111,8 @@ python3 /opt/fuzzer/profraw_snapshotter.py \
     --done-file "${OUT}/fuzzer.done" > "${OUT}/snapshotter.log" 2>&1 &
 SNAP_PID=$!
 
-log "fuzzing ${FUZZ_SECONDS}s with -D ${DELAY}us, seeds=$(find "${SEEDS_DIR}" -name '*.raw' | wc -l), snapshot every ${SNAPSHOT_INTERVAL}s"
-run_afl "${DELAY}" "${FUZZ_SECONDS}" "${OUT}/afl-out" > "${OUT}/instance.log" 2>&1
+log "fuzzing ${FUZZ_SECONDS}s ${TRANSPORT}/-P ${PROTO} -D ${DELAY}us -W ${POLL}ms, seeds=$(find "${SEEDS_DIR}" -name '*.raw' | wc -l), snapshot every ${SNAPSHOT_INTERVAL}s"
+run_afl "${DELAY}" "${FUZZ_SECONDS}" "${OUT}/afl-out" "${POLL}" > "${OUT}/instance.log" 2>&1
 rc=$?
 touch "${OUT}/fuzzer.done"
 wait "${SNAP_PID}" 2>/dev/null || true

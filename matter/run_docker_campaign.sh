@@ -39,9 +39,11 @@ AGGREGATOR="${REPO_ROOT}/examples/fuzzers/eclipsefuzz/stateful/tools/aggregate_c
 DASHBOARD="${REPO_ROOT}/examples/fuzzers/eclipsefuzz/stateful/tools/generate_coverage_dashboard.py"
 
 IMAGE="aflnet-matter-campaign:local"
-INSTANCES=32
-FUZZ_SECONDS=604800
-DELAY_US=20000
+INSTANCES=20
+FUZZ_SECONDS=86400
+TRANSPORT=tcp
+DELAY_US=10000
+POLL_MS=20
 CALIBRATE=1
 INTERVAL=1800
 SCOPE=clusters
@@ -51,8 +53,9 @@ OUT_DIR="${REPO_ROOT}/out/aflnet-docker-campaign-$(date +%Y%m%d-%H%M%S)"
 PHASE2_WORKERS=16
 
 usage() { cat <<'U'
-Usage: run_docker_campaign.sh [--instances 32] [--fuzz-seconds 604800]
-         [--image TAG] [--out-dir DIR] [--delay-us 20000] [--no-calibrate]
+Usage: run_docker_campaign.sh [--instances 20] [--fuzz-seconds 86400]
+         [--image TAG] [--out-dir DIR] [--transport tcp|udp]
+         [--delay-us 10000] [--poll-ms 20] [--no-calibrate]
          [--interval 1800] [--scope clusters|sdk] [--cpus N.N]
          [--phase2] [--phase2-workers 16] [--no-coverage]
 U
@@ -64,6 +67,8 @@ while [[ $# -gt 0 ]]; do
     --image)          IMAGE="${2:?}";         shift 2 ;;
     --out-dir)        OUT_DIR="${2:?}";       shift 2 ;;
     --delay-us)       DELAY_US="${2:?}";      shift 2 ;;
+    --poll-ms)        POLL_MS="${2:?}";       shift 2 ;;
+    --transport)      TRANSPORT="${2:?}";     shift 2 ;;
     --no-calibrate)   CALIBRATE=0;            shift ;;
     --interval)       INTERVAL="${2:?}";      shift 2 ;;
     --scope)          SCOPE="${2:?}";         shift 2 ;;
@@ -97,8 +102,11 @@ fi
   echo "image=${IMAGE}"
   echo "instances=${INSTANCES}"
   echo "fuzz_seconds=${FUZZ_SECONDS}"
+  echo "transport=${TRANSPORT}"
   echo "delay_us=${DELAY_US}"
+  echo "poll_ms=${POLL_MS}"
   echo "calibrate=${CALIBRATE}"
+  echo "replica_model=independent"
   echo "snapshot_interval=${INTERVAL}"
   echo "execution_mode=docker-netns-per-instance"
   echo "coverage_mode=${COV_MODE}"
@@ -126,6 +134,7 @@ for i in $(seq 1 "${INSTANCES}"); do
     "${cpu_arg[@]}" \
     -e FUZZ_SECONDS="${FUZZ_SECONDS}" -e DELAY_US="${DELAY_US}" \
     -e CALIBRATE="${CALIBRATE}" -e INSTANCE="instance-${idx}" \
+    -e TRANSPORT="${TRANSPORT}" -e POLL_MS="${POLL_MS}" \
     -e SNAPSHOT_INTERVAL="${INTERVAL}" \
     -v "${inst}:/workdir/output" \
     "${IMAGE}" >/dev/null

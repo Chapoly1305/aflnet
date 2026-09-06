@@ -59,7 +59,20 @@ ENV ASAN_OPTIONS=abort_on_error=1:symbolize=0:detect_leaks=0:allocator_may_retur
 ENV DEBUGINFOD_URLS=""
 ENV AFLNET=/opt/aflnet AFL_PATH=/opt/aflnet PATH="/opt/aflnet:${PATH}"
 # Every container has its own netns, so this port never collides.
-ENV FUZZ_PORT=5560 DELAY_US=20000 FUZZ_SECONDS=604800 SNAPSHOT_INTERVAL=1800
+# Defaults for the 24 h x 20-instance TCP campaign.
+#   TRANSPORT=tcp   Matter's spec'd stream framing (Core Spec 4.5/4.5.1) and
+#                   AFLNet's dominant mode (6 of 7 upstream tutorials use tcp://).
+#   DELAY_US=10000  the value 6 of 7 upstream tutorials use.
+#   POLL_MS=20      AFLNet's -W default of 1 ms is too tight to catch the reply,
+#                   and TCP needs more than UDP because the forked child must
+#                   accept() first (measured: fails at W=10, works at W=20).
+#                   Upstream raises -W the same way for its datagram target
+#                   (tutorials/tinydtls uses -W 30).
+#   AFL_ALGO_FLAGS  state-aware mode + the state/seed selection algorithms the
+#                   upstream tutorials use (-q 3 -s 3 -E -R), plus -K/-d.
+ENV FUZZ_PORT=5560 TRANSPORT=tcp DELAY_US=10000 POLL_MS=20 \
+    FUZZ_SECONDS=86400 SNAPSHOT_INTERVAL=1800 \
+    AFL_ALGO_FLAGS="-d -q 3 -s 3 -E -K -R"
 
 WORKDIR /opt/fuzzer
 ENTRYPOINT ["/opt/fuzzer/entrypoint.sh"]
