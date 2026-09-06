@@ -34,6 +34,9 @@ COPY chip-all-clusters-app-fuzz /opt/fuzzer/chip-all-clusters-app-fuzz
 COPY chip-all-clusters-app-cov  /opt/fuzzer/chip-all-clusters-app-cov
 # Frozen seed corpus (exported from the EP2 corpus; .raw only).
 COPY seeds/ /opt/fuzzer/seeds/
+# Protocol dictionary, generated from our corpus and verified against the seeds
+# (generate_matter_aflnet_dict.py). ProFuzzBench passes -x for most subjects.
+COPY matter.dict /opt/fuzzer/matter.dict
 COPY entrypoint.sh /opt/fuzzer/entrypoint.sh
 # Live coverage sampler: EP2's own snapshotter, run with --continuous.
 COPY profraw_snapshotter.py /opt/fuzzer/profraw_snapshotter.py
@@ -70,9 +73,14 @@ ENV AFLNET=/opt/aflnet AFL_PATH=/opt/aflnet PATH="/opt/aflnet:${PATH}"
 #                   (tutorials/tinydtls uses -W 30).
 #   AFL_ALGO_FLAGS  state-aware mode + the state/seed selection algorithms the
 #                   upstream tutorials use (-q 3 -s 3 -E -R), plus -K/-d.
+#   TEST_TIMEOUT_MS ProFuzzBench uses TEST_TIMEOUT=20000 -> -t 20000+. Our old
+#                   -t 4000+ was 5x tighter and risks scoring a slow but normal
+#                   execution as a timeout on an ASAN DUT.
 ENV FUZZ_PORT=5560 TRANSPORT=tcp DELAY_US=10000 POLL_MS=20 \
     FUZZ_SECONDS=86400 SNAPSHOT_INTERVAL=1800 \
-    AFL_ALGO_FLAGS="-d -q 3 -s 3 -E -K -R"
+    AFL_ALGO_FLAGS="-d -q 3 -s 3 -E -K -R" \
+    DICT=/opt/fuzzer/matter.dict \
+    TEST_TIMEOUT_MS=20000
 
 WORKDIR /opt/fuzzer
 ENTRYPOINT ["/opt/fuzzer/entrypoint.sh"]

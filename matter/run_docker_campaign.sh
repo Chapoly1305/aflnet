@@ -48,7 +48,10 @@ CALIBRATE=1
 INTERVAL=1800
 SCOPE=clusters
 COV_MODE=live
-CPUS=""
+# ProFuzzBench runs each repetition in its own container with --cpus=1
+# (profuzzbench_exec_common.sh). Pinning matters at 20-way: without it the
+# instances contend and neither the throughput nor the comparison is reproducible.
+CPUS="1"
 OUT_DIR="${REPO_ROOT}/out/aflnet-docker-campaign-$(date +%Y%m%d-%H%M%S)"
 PHASE2_WORKERS=16
 

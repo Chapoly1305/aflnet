@@ -93,6 +93,8 @@ cp "${FUZZ_DUT}" "${STAGE}/chip-all-clusters-app-fuzz"
 cp "${COV_DUT}"  "${STAGE}/chip-all-clusters-app-cov"
 find "${SEED_DIR}" -maxdepth 1 -name '*.raw' -exec cp {} "${STAGE}/seeds/" \;
 cp "${SCRIPT_DIR}/entrypoint.sh" "${SCRIPT_DIR}/phase2_parallel.py" "${STAGE}/"
+[[ -f "${SCRIPT_DIR}/matter.dict" ]] || { echo "ERROR: matter.dict missing -- run generate_matter_aflnet_dict.py" >&2; exit 1; }
+cp "${SCRIPT_DIR}/matter.dict" "${STAGE}/"
 cp "${REPO_ROOT}/examples/fuzzers/eclipsefuzz/hpc/profraw_snapshotter.py" "${STAGE}/"
 cp "${SCRIPT_DIR}/Dockerfile.campaign" "${STAGE}/Dockerfile"
 
@@ -109,6 +111,7 @@ BUILD_ARGS=(--tag "${IMAGE_TAG}"
   --label "aflnet.seed_count=${n_seeds}"
   --label "aflnet.seed_set_sha256=${SEED_SHA}"
   --label "aflnet.seed_transport=${SEED_TRANSPORT}"
+  --label "aflnet.dict_tokens=$(grep -c '=' "${SCRIPT_DIR}/matter.dict")"
   --label "aflnet.repo_commit=$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)")
 [[ "${NO_CACHE}" -eq 1 ]] && BUILD_ARGS+=(--no-cache)
 

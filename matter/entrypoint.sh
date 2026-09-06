@@ -25,6 +25,15 @@ SEEDS_DIR="${SEEDS_DIR:-/opt/fuzzer/seeds}"
 DUT=/opt/fuzzer/chip-all-clusters-app-fuzz
 KVS=/tmp/chip_kvs
 INSTANCE="${INSTANCE:-instance-01}"
+# ProFuzzBench hands AFLNet a protocol dictionary for most of its subjects
+# (-x ftp.dict / http.dict / rtsp.dict); ours is generated from our own corpus
+# and every token is verified to occur in the seeds, so it injects nothing the
+# seeds do not already carry. Without it AFLNet has to rediscover fixed
+# constants -- cluster ids, command ids, TLV control octets -- by chance.
+DICT_ARG=""
+if [[ -n "${DICT:-}" && -f "${DICT}" ]]; then
+  DICT_ARG="-x ${DICT}"
+fi
 PROFRAW_DIR="${OUT}/profraw"
 mkdir -p "${OUT}" "${PROFRAW_DIR}"
 
@@ -45,8 +54,8 @@ run_afl() {  # $1=delay_us  $2=timeout_s  $3=outdir  $4=poll_ms
       -d -i "${SEEDS_DIR}" -o "$3" \
       -N "${NETSPEC}" -P "${PROTO}" \
       -D "$1" -W "$4" \
-      ${AFL_ALGO_FLAGS} \
-      -m none -t 4000+ \
+      ${AFL_ALGO_FLAGS} ${DICT_ARG} \
+      -m none -t "${TEST_TIMEOUT_MS}+" \
       -- "${DUT}" --secured-device-port "${FUZZ_PORT}" --KVS "${KVS}"
 }
 
@@ -91,6 +100,9 @@ echo "poll_ms=${POLL}"     >> "${OUT}/run.env"
 echo "transport=${TRANSPORT}" >> "${OUT}/run.env"
 echo "protocol=${PROTO}"   >> "${OUT}/run.env"
 echo "afl_algo_flags=${AFL_ALGO_FLAGS}" >> "${OUT}/run.env"
+echo "dict=${DICT:-none}" >> "${OUT}/run.env"
+echo "dict_tokens=$(grep -c '=' "${DICT}" 2>/dev/null || echo 0)" >> "${OUT}/run.env"
+echo "test_timeout_ms=${TEST_TIMEOUT_MS}" >> "${OUT}/run.env"
 echo "fuzz_port=${FUZZ_PORT}" >> "${OUT}/run.env"
 echo "instance=${INSTANCE}"   >> "${OUT}/run.env"
 echo "seeds=$(find "${SEEDS_DIR}" -name '*.raw' | wc -l)" >> "${OUT}/run.env"
