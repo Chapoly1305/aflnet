@@ -13,8 +13,8 @@
 #   across all instances → coverage_over_time.csv + .png.
 #
 # Two DUT binaries required (built relative to REPO_ROOT):
-#   out/afl-dut-cov/chip-all-clusters-app         fuzz DUT (trace-pc-guard + ASAN)
-#   out/afl-dut-replay-cov/chip-all-clusters-app   coverage DUT (profgen only)
+#   out/aflnet-dut-fuzz/chip-all-clusters-app         fuzz DUT (trace-pc-guard + ASAN)
+#   out/aflnet-dut-cov/chip-all-clusters-app   coverage DUT (profgen only)
 #
 # Usage:
 #   run_coverage_eval_campaign.sh [--instances N] [--max-total-time SEC]
@@ -52,8 +52,8 @@ SKIPCOUNT=5
 BASE_PORT=5560
 SEEDS_KIND="both"
 SEED_LIMIT=0
-FUZZ_DUT="${REPO_ROOT}/out/afl-dut-cov/chip-all-clusters-app"
-COV_DUT="${REPO_ROOT}/out/afl-dut-replay-cov/chip-all-clusters-app"
+FUZZ_DUT="${REPO_ROOT}/out/aflnet-dut-fuzz/chip-all-clusters-app"
+COV_DUT="${REPO_ROOT}/out/aflnet-dut-cov/chip-all-clusters-app"
 OUT_DIR="${REPO_ROOT}/out/aflnet-eval-$(date +%Y%m%d-%H%M%S)"
 DO_AGGREGATE=1
 

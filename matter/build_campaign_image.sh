@@ -14,8 +14,8 @@ AFLNET_DIR="$(dirname "${SCRIPT_DIR}")"
 REPO_ROOT="$(cd "${AFLNET_DIR}/../../.." && pwd)"
 
 IMAGE_TAG="aflnet-matter-campaign:local"
-FUZZ_DUT="${REPO_ROOT}/out/afl-dut-live-cov/chip-all-clusters-app"
-COV_DUT="${REPO_ROOT}/out/afl-dut-replay-cov/chip-all-clusters-app"
+FUZZ_DUT="${REPO_ROOT}/out/aflnet-dut-fuzz/chip-all-clusters-app"
+COV_DUT="${REPO_ROOT}/out/aflnet-dut-cov/chip-all-clusters-app"
 SEED_DIR="${REPO_ROOT}/out/aflnet-seeds-tcp-20260906"
 NO_CACHE=0
 
@@ -65,15 +65,22 @@ fi
 # under `set -o pipefail` reports failure even on a match, because grep exits
 # early and the producer dies of SIGPIPE.
 fuzz_syms="$(nm -C "${FUZZ_DUT}" 2>/dev/null || true)"
-# __llvm_profile_counter_bias is the tell for -fprofile-continuous: without it
-# LLVM_PROFILE_FILE=...%c... fails at runtime with "Neither
-# __llvm_profile_counter_bias nor __llvm_profile_bitmap_bias is defined" and
-# leaves a 0-byte profraw, i.e. a campaign that records no coverage at all.
-for sym in __afl_area_ptr __afl_manual_init __sanitizer_cov_trace_pc_guard \
-           __llvm_profile_write_file __llvm_profile_counter_bias; do
+for sym in __afl_area_ptr __afl_manual_init __sanitizer_cov_trace_pc_guard; do
   grep -qw -- "${sym}" <<<"${fuzz_syms}" || {
-    echo "ERROR: ${FUZZ_DUT} lacks ${sym} -- rebuild with matter_fuzz_afl_instrument=true \
-use_coverage=true matter_fuzz_continuous_coverage=true" >&2; exit 1; }
+    echo "ERROR: ${FUZZ_DUT} lacks ${sym} -- rebuild with \
+matter_fuzz_dut_transport=true matter_fuzz_afl_instrument=true" >&2; exit 1; }
+done
+# And it must NOT carry coverage-measurement instrumentation. Coverage comes
+# from replaying the queue against COV_DUT (the ProFuzzBench design), so
+# profiling the fuzz DUT only costs throughput the compared in-process fuzzer
+# does not pay, and makes the two systems' llvm-cov denominators diverge.
+# __llvm_profile_counter_bias is the tell for -fprofile-continuous;
+# __llvm_profile_write_file for use_coverage=true.
+for sym in __llvm_profile_counter_bias __llvm_profile_write_file; do
+  grep -qw -- "${sym}" <<<"${fuzz_syms}" && {
+    echo "ERROR: ${FUZZ_DUT} carries ${sym} -- the fuzz DUT must be built WITHOUT \
+use_coverage / matter_fuzz_continuous_coverage. Coverage is measured by replaying \
+the queue against the cov DUT; see run_docker_campaign.sh header." >&2; exit 1; }
 done
 fuzz_strings="$(strings -a "${FUZZ_DUT}" 2>/dev/null | grep -c 'SIG_AFL_DEFER_FORKSRV' || true)"
 [[ "${fuzz_strings}" -gt 0 ]] || {
@@ -89,8 +96,8 @@ mkdir -p "${STAGE}/aflnet" "${STAGE}/seeds"
 for f in afl-fuzz afl-showmap afl-tmin aflnet-replay afl-replay; do
   [[ -f "${AFLNET_DIR}/${f}" ]] && cp "${AFLNET_DIR}/${f}" "${STAGE}/aflnet/"
 done
-cp "${FUZZ_DUT}" "${STAGE}/chip-all-clusters-app-fuzz"
-cp "${COV_DUT}"  "${STAGE}/chip-all-clusters-app-cov"
+cp "${FUZZ_DUT}" "${STAGE}/aflnet-chip-all-clusters-app-fuzz"
+cp "${COV_DUT}"  "${STAGE}/aflnet-chip-all-clusters-app-cov"
 find "${SEED_DIR}" -maxdepth 1 -name '*.raw' -exec cp {} "${STAGE}/seeds/" \;
 cp "${SCRIPT_DIR}/entrypoint.sh" "${SCRIPT_DIR}/phase2_parallel.py" "${STAGE}/"
 [[ -f "${SCRIPT_DIR}/matter.dict" ]] || { echo "ERROR: matter.dict missing -- run generate_matter_aflnet_dict.py" >&2; exit 1; }
@@ -101,12 +108,12 @@ cp "${SCRIPT_DIR}/Dockerfile.campaign" "${STAGE}/Dockerfile"
 sha() { sha256sum "$1" | cut -d' ' -f1; }
 SEED_SHA="$(cd "${STAGE}/seeds" && sha256sum *.raw | sort -k2 | sha256sum | cut -d' ' -f1)"
 
-echo "[build] staging: fuzz_dut=$(sha "${STAGE}/chip-all-clusters-app-fuzz" | cut -c1-12) "\
-     "cov_dut=$(sha "${STAGE}/chip-all-clusters-app-cov" | cut -c1-12) seeds=${n_seeds}/${SEED_SHA:0:12}"
+echo "[build] staging: fuzz_dut=$(sha "${STAGE}/aflnet-chip-all-clusters-app-fuzz" | cut -c1-12) "\
+     "cov_dut=$(sha "${STAGE}/aflnet-chip-all-clusters-app-cov" | cut -c1-12) seeds=${n_seeds}/${SEED_SHA:0:12}"
 
 BUILD_ARGS=(--tag "${IMAGE_TAG}"
-  --label "aflnet.fuzz_dut_sha256=$(sha "${STAGE}/chip-all-clusters-app-fuzz")"
-  --label "aflnet.cov_dut_sha256=$(sha "${STAGE}/chip-all-clusters-app-cov")"
+  --label "aflnet.fuzz_dut_sha256=$(sha "${STAGE}/aflnet-chip-all-clusters-app-fuzz")"
+  --label "aflnet.cov_dut_sha256=$(sha "${STAGE}/aflnet-chip-all-clusters-app-cov")"
   --label "aflnet.afl_fuzz_sha256=$(sha "${STAGE}/aflnet/afl-fuzz")"
   --label "aflnet.seed_count=${n_seeds}"
   --label "aflnet.seed_set_sha256=${SEED_SHA}"

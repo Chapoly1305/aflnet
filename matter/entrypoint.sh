@@ -22,7 +22,7 @@ set -uo pipefail
 
 OUT=/workdir/output
 SEEDS_DIR="${SEEDS_DIR:-/opt/fuzzer/seeds}"
-DUT=/opt/fuzzer/chip-all-clusters-app-fuzz
+DUT=/opt/fuzzer/aflnet-chip-all-clusters-app-fuzz
 KVS=/tmp/chip_kvs
 INSTANCE="${INSTANCE:-instance-01}"
 # ProFuzzBench hands AFLNet a protocol dictionary for most of its subjects
@@ -152,25 +152,21 @@ echo "seeds=$(find "${SEEDS_DIR}" -name '*.raw' | wc -l)" >> "${OUT}/run.env"
 echo "started=$(date -Iseconds)" >> "${OUT}/run.env"
 
 # --- campaign -----------------------------------------------------------------
-# One live, mmap'd profraw for the whole campaign (%c = continuous mode).
-export LLVM_PROFILE_FILE="${PROFRAW_DIR}/afl_%c.profraw"
-echo "MATTER_FUZZ_COVERAGE_BINARY=/opt/fuzzer/chip-all-clusters-app-fuzz" > "${OUT}/coverage-run.env"
-
-# Sample it on the interval with EP2's own snapshotter. --out-dir is the
-# instance root so snapshots land in <instance>/snapshots/, which is exactly
-# where aggregate_coverage_over_time.py looks.
-rm -f "${OUT}/fuzzer.done"
-python3 /opt/fuzzer/profraw_snapshotter.py \
-    --profile-dir "${PROFRAW_DIR}" --out-dir "${OUT}" \
-    --interval "${SNAPSHOT_INTERVAL}" --continuous \
-    --done-file "${OUT}/fuzzer.done" > "${OUT}/snapshotter.log" 2>&1 &
-SNAP_PID=$!
+# The fuzz DUT carries NO coverage-measurement instrumentation. That is the
+# ProFuzzBench / AFLNet reference design: the target is compiled a second time
+# for coverage, and the curve is produced afterwards by replaying the saved
+# queue against that second binary in seed-mtime order (phase2_parallel.py).
+# See ai_docs/benchmark-fuzzers.md, "Coverage measurement".
+#
+# Do NOT reintroduce LLVM_PROFILE_FILE / profraw_snapshotter.py here: profiling
+# the fuzz binary costs throughput that the compared in-process fuzzer does not
+# pay, and it makes each system's coverage come from its own binary, so the
+# llvm-cov denominators stop being comparable.
+echo "MATTER_FUZZ_COVERAGE_BINARY=/opt/fuzzer/aflnet-chip-all-clusters-app-cov" > "${OUT}/coverage-run.env"
 
 log "fuzzing ${FUZZ_SECONDS}s ${TRANSPORT}/-P ${PROTO} -D ${DELAY}us -W ${POLL}ms, seeds=$(find "${SEEDS_DIR}" -name '*.raw' | wc -l), snapshot every ${SNAPSHOT_INTERVAL}s"
 run_afl "${DELAY}" "${FUZZ_SECONDS}" "${OUT}/afl-out" "${POLL}" > "${OUT}/instance.log" 2>&1
 rc=$?
-touch "${OUT}/fuzzer.done"
-wait "${SNAP_PID}" 2>/dev/null || true
 echo "ended=$(date -Iseconds)" >> "${OUT}/run.env"
 echo "afl_exit=${rc}" >> "${OUT}/run.env"
 
@@ -195,14 +191,14 @@ q=$(ls "${OUT}/afl-out/replayable-queue" 2>/dev/null | wc -l)
 [[ "${q}" -gt 0 ]] || fail empty-queue "afl-out/replayable-queue is empty -- nothing was fuzzed"
 echo "queue_entries=${q}" >> "${OUT}/run.env"
 
-# A 0-byte profraw means continuous mode never armed (wrong build, or %c missing)
-# -- the campaign would otherwise finish with no coverage at all.
-prof_bytes=$(stat -c%s "${PROFRAW_DIR}"/afl_*.profraw 2>/dev/null | head -1)
-[[ "${prof_bytes:-0}" -gt 0 ]] || fail no-profraw \
-  "profraw is missing/empty -- DUT not built with matter_fuzz_continuous_coverage=true?"
-snaps=$(ls "${OUT}/snapshots"/snapshot-*s.profdata 2>/dev/null | wc -l)
-echo "profraw_bytes=${prof_bytes}" >> "${OUT}/run.env"
-echo "snapshots=${snaps}" >> "${OUT}/run.env"
+# Coverage is derived later by replaying afl-out/replayable-queue against the
+# profgen DUT, so the queue -- not a profraw -- is the artifact this instance
+# must hand over. It MUST survive the pull; a pull that drops replayable-queue
+# destroys the coverage-over-time data.
+qbytes=$(du -sb "${OUT}/afl-out/replayable-queue" 2>/dev/null | cut -f1)
+[[ "${qbytes:-0}" -gt 0 ]] || fail empty-replayable-queue \
+  "replayable-queue has no bytes -- nothing to replay for coverage"
+echo "replayable_queue_bytes=${qbytes}" >> "${OUT}/run.env"
 log "done rc=${rc}; queue=${q} entries"
 echo "status=ok" >> "${OUT}/run.env"
 touch "${OUT}/.done"

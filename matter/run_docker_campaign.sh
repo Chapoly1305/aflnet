@@ -18,18 +18,32 @@
 #   docker0 address pool pressure at 32+ containers. Nothing is published to the
 #   host, so there is no host-side port to collide with.
 #
-# Coverage is collected LIVE, the same way EP2 does it: the DUT is built with
-#   -fprofile-continuous and run with LLVM_PROFILE_FILE=...%c..., so its counters
-#   are mmap'd into one .profraw that stays current even though AFL kills every
-#   forked child; profraw_snapshotter.py --continuous samples that file every
-#   --interval seconds into instance-NN/snapshots/. Same mechanism, same tool,
-#   same cadence, same aggregator as EP2.
+# Coverage is collected by QUEUE REPLAY (default, COV_MODE=phase2) -- the
+#   ProFuzzBench / AFLNet reference design. The target is compiled twice: the
+#   fuzz DUT carries AFL instrumentation and NO profiling, and a second profgen
+#   DUT is never fuzzed, only replayed against. After fuzzing,
+#   phase2_parallel.py replays each instance's replayable-queue in seed-mtime
+#   order, cumulatively merging llvm-profdata into snapshot-<elapsed>s.profdata
+#   once per --interval. ProFuzzBench: "It runs again the inputs using the
+#   target software compiled with gcov ... generates time series ... based on
+#   the timestamps at which the inputs were generated." TSE'25 (the AFLNet
+#   authors' own re-evaluation) measures branch coverage this way.
 #
-#   --phase2 selects the old fallback instead: replay each instance's
-#   replayable-queue through the profgen DUT. Only needed if continuous mode is
-#   unavailable, and it measures a different quantity -- replay covers only the
-#   inputs AFL kept in its queue, whereas the live profile counts every
-#   execution, including the ones AFL discarded.
+#   Why not live profiling of the fuzz DUT: it needs -fprofile-continuous
+#   (AFL kills every forked child, so a plain profgen build writes nothing),
+#   which costs per-counter indirection plus mmap writeback that the compared
+#   in-process fuzzer does not pay, and it makes each system's coverage come
+#   from its own binary -- so the llvm-cov denominators stop being comparable
+#   ("edge counts between different binaries do not translate").
+#
+#   Caveat, and it MUST be applied symmetrically: replay only covers inputs AFL
+#   kept in its queue, while a live profile also counts executions the fuzzer
+#   discarded. So EclipseFuzz has to be scored by corpus replay against the SAME
+#   profgen binary too; scoring one system live and the other by replay would
+#   hand the live one credit for discarded executions.
+#
+#   --live restores the old in-campaign profraw sampling (needs a fuzz DUT built
+#   with use_coverage=true matter_fuzz_continuous_coverage=true).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,7 +61,7 @@ POLL_MS=20
 CALIBRATE=0
 INTERVAL=1800
 SCOPE=clusters
-COV_MODE=live
+COV_MODE=phase2
 # ProFuzzBench runs each repetition in its own container with --cpus=1
 # (profuzzbench_exec_common.sh). Pinning matters at 20-way: without it the
 # instances contend and neither the throughput nor the comparison is reproducible.
@@ -60,7 +74,7 @@ Usage: run_docker_campaign.sh [--instances 20] [--fuzz-seconds 86400]
          [--image TAG] [--out-dir DIR] [--transport tcp|udp]
          [--delay-us 10000] [--poll-ms 20] [--calibrate]
          [--interval 1800] [--scope clusters|sdk] [--cpus N.N]
-         [--phase2] [--phase2-workers 16] [--no-coverage]
+         [--phase2] [--live] [--phase2-workers 16] [--no-coverage]
 U
 }
 while [[ $# -gt 0 ]]; do
@@ -78,6 +92,7 @@ while [[ $# -gt 0 ]]; do
     --cpus)           CPUS="${2:?}";          shift 2 ;;
     --phase2-workers) PHASE2_WORKERS="${2:?}"; shift 2 ;;
     --phase2)         COV_MODE=phase2;        shift ;;
+    --live)           COV_MODE=live;          shift ;;
     --no-coverage)    COV_MODE=none;          shift ;;
     -h|--help)        usage; exit 0 ;;
     *) echo "ERROR: unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -91,13 +106,13 @@ docker image inspect "${IMAGE}" >/dev/null 2>&1 || {
 mkdir -p "${OUT_DIR}"
 
 RUN_ID="$(basename "${OUT_DIR}")"
-COV_DUT_IN_IMAGE=/opt/fuzzer/chip-all-clusters-app-cov
+COV_DUT_IN_IMAGE=/opt/fuzzer/aflnet-chip-all-clusters-app-cov
 # llvm-cov must read the profile with the SAME binary that produced it, so the
 # live path scores against the fuzz DUT, not the profgen replay DUT.
 if [[ "${COV_MODE}" == "live" ]]; then
-  HOST_SCORING_DUT="${REPO_ROOT}/out/afl-dut-live-cov/chip-all-clusters-app"
+  HOST_SCORING_DUT="${REPO_ROOT}/out/aflnet-dut-fuzz/chip-all-clusters-app"
 else
-  HOST_SCORING_DUT="${REPO_ROOT}/out/afl-dut-replay-cov/chip-all-clusters-app"
+  HOST_SCORING_DUT="${REPO_ROOT}/out/aflnet-dut-cov/chip-all-clusters-app"
 fi
 
 {

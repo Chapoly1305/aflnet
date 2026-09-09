@@ -30,8 +30,8 @@ COPY aflnet/ /opt/aflnet/
 #          counters must be mmap'd into the .profraw instead. Build it with
 #          use_coverage=true matter_fuzz_continuous_coverage=true.
 #   cov  = profgen only; used solely by the Phase-2 replay fallback.
-COPY chip-all-clusters-app-fuzz /opt/fuzzer/chip-all-clusters-app-fuzz
-COPY chip-all-clusters-app-cov  /opt/fuzzer/chip-all-clusters-app-cov
+COPY aflnet-chip-all-clusters-app-fuzz /opt/fuzzer/aflnet-chip-all-clusters-app-fuzz
+COPY aflnet-chip-all-clusters-app-cov  /opt/fuzzer/aflnet-chip-all-clusters-app-cov
 # Frozen seed corpus (exported from the EP2 corpus; .raw only).
 COPY seeds/ /opt/fuzzer/seeds/
 # Protocol dictionary, generated from our corpus and verified against the seeds
@@ -43,8 +43,8 @@ COPY profraw_snapshotter.py /opt/fuzzer/profraw_snapshotter.py
 # Phase-2 queue replay: fallback path only (see run_docker_campaign.sh --phase2).
 COPY phase2_parallel.py /opt/fuzzer/phase2_parallel.py
 
-RUN chmod +x /opt/aflnet/afl-fuzz /opt/fuzzer/chip-all-clusters-app-fuzz \
-             /opt/fuzzer/chip-all-clusters-app-cov /opt/fuzzer/entrypoint.sh \
+RUN chmod +x /opt/aflnet/afl-fuzz /opt/fuzzer/aflnet-chip-all-clusters-app-fuzz \
+             /opt/fuzzer/aflnet-chip-all-clusters-app-cov /opt/fuzzer/entrypoint.sh \
              /opt/fuzzer/phase2_parallel.py /opt/fuzzer/profraw_snapshotter.py
 
 # AFL host-environment checks that cannot pass inside an unprivileged container:
