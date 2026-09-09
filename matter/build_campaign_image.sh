@@ -102,7 +102,6 @@ find "${SEED_DIR}" -maxdepth 1 -name '*.raw' -exec cp {} "${STAGE}/seeds/" \;
 cp "${SCRIPT_DIR}/entrypoint.sh" "${SCRIPT_DIR}/phase2_parallel.py" "${STAGE}/"
 [[ -f "${SCRIPT_DIR}/matter.dict" ]] || { echo "ERROR: matter.dict missing -- run generate_matter_aflnet_dict.py" >&2; exit 1; }
 cp "${SCRIPT_DIR}/matter.dict" "${STAGE}/"
-cp "${REPO_ROOT}/examples/fuzzers/eclipsefuzz/hpc/profraw_snapshotter.py" "${STAGE}/"
 cp "${SCRIPT_DIR}/Dockerfile.campaign" "${STAGE}/Dockerfile"
 
 sha() { sha256sum "$1" | cut -d' ' -f1; }

@@ -2,19 +2,18 @@
 # In-container AFLNet campaign runner (one instance per container).
 #
 # Created: 2026-09-06
-# Purpose: headless entrypoint for Dockerfile.campaign -- calibrates the AFLNet
-#          settle delay, then fuzzes for FUZZ_SECONDS into the bind-mounted
-#          /workdir/output while sampling LLVM source coverage live every
-#          SNAPSHOT_INTERVAL seconds -- the same mechanism, tool and cadence EP2
-#          uses, so the two curves are directly comparable.
+# Purpose: headless entrypoint for Dockerfile.campaign -- fuzzes for
+#          FUZZ_SECONDS into the bind-mounted /workdir/output. It does NOT
+#          measure coverage: the fuzz DUT carries no profiling instrumentation,
+#          and the curve is produced afterwards by replaying afl-out/
+#          replayable-queue against the separate profgen DUT
+#          (phase2_parallel.py), which is the ProFuzzBench / AFLNet reference
+#          design. See run_docker_campaign.sh header.
 # Retention: PERMANENT (benchmark pipeline step)
 #
-# Live coverage works because the DUT is built with -fprofile-continuous and run
-# with LLVM_PROFILE_FILE=...%c...: the counters are mmap'd into the .profraw, so
-# each forked child's coverage lands there even though AFL kills it and it never
-# runs atexit. profraw_snapshotter.py --continuous then samples that one live
-# file on the interval (and must NOT prune it -- unlinking a live mapping loses
-# every later update).
+# Consequence: afl-out/replayable-queue IS this instance's coverage artifact.
+# It must survive the pull -- a pull that drops it destroys the whole
+# coverage-over-time series, which cannot be reconstructed afterwards.
 #
 # Env: FUZZ_SECONDS, FUZZ_PORT, DELAY_US, POLL_MS, TRANSPORT, AFL_ALGO_FLAGS,
 #      CALIBRATE=1|0, SEEDS_DIR, INSTANCE, SNAPSHOT_INTERVAL
