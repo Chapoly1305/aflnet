@@ -194,10 +194,22 @@ echo "queue_entries=${q}" >> "${OUT}/run.env"
 # profgen DUT, so the queue -- not a profraw -- is the artifact this instance
 # must hand over. It MUST survive the pull; a pull that drops replayable-queue
 # destroys the coverage-over-time data.
-qbytes=$(du -sb "${OUT}/afl-out/replayable-queue" 2>/dev/null | cut -f1)
+# Sum real file bytes, not `du -sb`: on ext4 a directory inode does not shrink
+# when its entries are removed, so `du` on an EMPTIED replayable-queue still
+# reports tens of KB and this gate would pass on nothing.
+qbytes=$(find "${OUT}/afl-out/replayable-queue" -type f -printf '%s\n' 2>/dev/null \
+         | awk '{s+=$1} END{print s+0}')
 [[ "${qbytes:-0}" -gt 0 ]] || fail empty-replayable-queue \
   "replayable-queue has no bytes -- nothing to replay for coverage"
 echo "replayable_queue_bytes=${qbytes}" >> "${OUT}/run.env"
+# AFL creates its output tree mode 0700 owned by root (the container's uid).
+# Both the pull and the replay-based scoring run unprivileged, and a
+# "Permission denied" on replayable-queue is indistinguishable from an empty
+# queue from the outside -- which is exactly how a 24h campaign's queue once
+# looked lost when it was in fact intact. Since replayable-queue IS the coverage
+# artifact, make the whole tree readable before handing it over.
+chmod -R a+rX "${OUT}" 2>/dev/null || true
+
 log "done rc=${rc}; queue=${q} entries"
 echo "status=ok" >> "${OUT}/run.env"
 touch "${OUT}/.done"
