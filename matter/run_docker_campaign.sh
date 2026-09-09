@@ -187,7 +187,7 @@ else
   docker run --rm --init --network none \
     --user "$(id -u):$(id -g)" \
     --entrypoint python3 \
-    -e PATH="/usr/lib/llvm-20/bin:/usr/bin:/bin" \
+    -e PATH="/opt/llvm:/usr/bin:/bin" \
     -v "${OUT_DIR}:/campaign" \
     "${IMAGE}" /opt/fuzzer/phase2_parallel.py \
       --eval-dir /campaign --cov-dut "${COV_DUT_IN_IMAGE}" \

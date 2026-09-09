@@ -17,7 +17,7 @@ RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       libglib2.0-0 libmount1 libblkid1 libselinux1 libffi8 libpcre2-8-0 \
       libstdc++6 libgcc-s1 zlib1g ca-certificates python3 \
-      libcgraph6 libcdt5 libcap2 llvm-20 && \
+      libcgraph6 libcdt5 libcap2 && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # AFLNet driver + helpers (built on the host with the -P MATTER parser).
@@ -40,13 +40,19 @@ COPY seeds/ /opt/fuzzer/seeds/
 # Protocol dictionary, generated from our corpus and verified against the seeds
 # (generate_matter_aflnet_dict.py). ProFuzzBench passes -x for most subjects.
 COPY matter.dict /opt/fuzzer/matter.dict
+# llvm-profdata / llvm-cov from the SAME toolchain that built the cov DUT
+# (pigweed CIPD clang, Fuchsia LLVM 21). Ubuntu's llvm-20 packages used to do the
+# in-container merge while the host aggregator read the result with LLVM 21,
+# which reported "N functions have mismatched data". Version-matched tooling is
+# not optional for coverage: profdata and coverage-mapping formats are versioned.
+COPY llvm/ /opt/llvm/
 COPY entrypoint.sh /opt/fuzzer/entrypoint.sh
 # Queue replay: the DEFAULT coverage path (run_docker_campaign.sh COV_MODE=phase2).
 COPY phase2_parallel.py /opt/fuzzer/phase2_parallel.py
 
 RUN chmod +x /opt/aflnet/afl-fuzz /opt/fuzzer/aflnet-chip-all-clusters-app-fuzz \
              /opt/fuzzer/aflnet-chip-all-clusters-app-cov /opt/fuzzer/entrypoint.sh \
-             /opt/fuzzer/phase2_parallel.py
+             /opt/fuzzer/phase2_parallel.py /opt/llvm/llvm-profdata /opt/llvm/llvm-cov
 
 # AFL host-environment checks that cannot pass inside an unprivileged container:
 #   core_pattern is a host sysctl; cpufreq governor is not visible; CPU affinity
@@ -63,7 +69,7 @@ ENV AFL_SKIP_CPUFREQ=1 \
 # signal for AFL to see it. Do NOT copy EP2's abort_on_error=0 here.
 ENV ASAN_OPTIONS=abort_on_error=1:symbolize=0:detect_leaks=0:allocator_may_return_null=1
 ENV DEBUGINFOD_URLS=""
-ENV AFLNET=/opt/aflnet AFL_PATH=/opt/aflnet PATH="/opt/aflnet:${PATH}"
+ENV AFLNET=/opt/aflnet AFL_PATH=/opt/aflnet PATH="/opt/llvm:/opt/aflnet:${PATH}"
 # Every container has its own netns, so this port never collides.
 # Defaults for the 24 h x 20-instance TCP campaign.
 #   TRANSPORT=tcp   Matter's spec'd stream framing (Core Spec 4.5/4.5.1) and

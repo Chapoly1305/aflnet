@@ -21,11 +21,16 @@ IMAGE_TAG="aflnet-matter-campaign:local"
 FUZZ_DUT="${REPO_ROOT}/out/aflnet-dut-fuzz/chip-all-clusters-app"
 COV_DUT="${REPO_ROOT}/out/aflnet-dut-cov/chip-all-clusters-app"
 SEED_DIR="${REPO_ROOT}/out/aflnet-seeds-tcp-20260908"
+# The image must carry the SAME llvm-profdata/llvm-cov that built the cov DUT.
+# Ubuntu's llvm-20 packages merged the profdata while the host aggregator read
+# it with pigweed's LLVM 21, which produced "N functions have mismatched data".
+LLVM_BIN="${REPO_ROOT}/.environment/cipd/packages/pigweed/bin"
 NO_CACHE=0
 
 usage() { cat <<'U'
 Usage: build_campaign_image.sh [--tag TAG] [--fuzz-dut PATH] [--cov-dut PATH]
-                               [--seeds DIR] [--repo-root DIR] [--no-cache]
+                               [--seeds DIR] [--repo-root DIR] [--llvm-bin DIR]
+                               [--no-cache]
 U
 }
 while [[ $# -gt 0 ]]; do
@@ -37,7 +42,9 @@ while [[ $# -gt 0 ]]; do
     --repo-root) REPO_ROOT="${2:?}"
                  FUZZ_DUT="${REPO_ROOT}/out/aflnet-dut-fuzz/chip-all-clusters-app"
                  COV_DUT="${REPO_ROOT}/out/aflnet-dut-cov/chip-all-clusters-app"
+                 LLVM_BIN="${REPO_ROOT}/.environment/cipd/packages/pigweed/bin"
                  shift 2 ;;
+    --llvm-bin) LLVM_BIN="${2:?}"; shift 2 ;;
     --no-cache) NO_CACHE=1; shift ;;
     -h|--help)  usage; exit 0 ;;
     *) echo "ERROR: unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -96,11 +103,17 @@ fuzz_strings="$(strings -a "${FUZZ_DUT}" 2>/dev/null | grep -c 'SIG_AFL_DEFER_FO
 cov_syms="$(nm -C "${COV_DUT}" 2>/dev/null || true)"
 grep -qw -- __llvm_profile_write_file <<<"${cov_syms}" || {
   echo "ERROR: ${COV_DUT} is not a profgen build" >&2; exit 1; }
+for t in llvm-profdata llvm-cov; do
+  [[ -x "${LLVM_BIN}/${t}" ]] || { echo "ERROR: ${LLVM_BIN}/${t} missing -- pass --llvm-bin \
+(or --repo-root) pointing at the toolchain that built the cov DUT" >&2; exit 1; }
+done
+LLVM_VER="$("${LLVM_BIN}/llvm-profdata" --version | head -1 | sed 's/^ *//')"
 
 STAGE="$(mktemp -d /tmp/aflnet-campaign-img-XXXXXX)"
 trap 'rm -rf -- "${STAGE}"' EXIT
 
-mkdir -p "${STAGE}/aflnet" "${STAGE}/seeds"
+mkdir -p "${STAGE}/aflnet" "${STAGE}/seeds" "${STAGE}/llvm"
+cp "${LLVM_BIN}/llvm-profdata" "${LLVM_BIN}/llvm-cov" "${STAGE}/llvm/"
 for f in afl-fuzz afl-showmap afl-tmin aflnet-replay afl-replay; do
   [[ -f "${AFLNET_DIR}/${f}" ]] && cp "${AFLNET_DIR}/${f}" "${STAGE}/aflnet/"
 done
@@ -126,6 +139,7 @@ BUILD_ARGS=(--tag "${IMAGE_TAG}"
   --label "aflnet.seed_set_sha256=${SEED_SHA}"
   --label "aflnet.seed_transport=${SEED_TRANSPORT}"
   --label "aflnet.dict_tokens=$(grep -c '=' "${SCRIPT_DIR}/matter.dict")"
+  --label "aflnet.llvm_version=${LLVM_VER}"
   --label "aflnet.repo_commit=$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)"
   # The AFLNet commit is the provenance that matters for the baseline: which
   # upstream AFLNet, plus our -P MATTER parser on top.

@@ -317,11 +317,18 @@ def main():
     cov_dut = args.cov_dut or meta_get(meta, "coverage_binary")
     if not cov_dut or not os.path.isfile(cov_dut):
         sys.exit(f"[p2par] cov DUT not found: {cov_dut}")
-    # Resolve llvm-profdata: PATH first (this is what the campaign container
-    # has), then the pigweed CIPD copy when running from a repo checkout. The
-    # repo-relative lookup must not assume a checkout layout -- the same file is
-    # copied to /opt/fuzzer inside the container, where parents[4] does not exist.
-    profdata_tool = shutil.which("llvm-profdata") or shutil.which("llvm-profdata-20")
+    # Resolve llvm-profdata: PATH first, then the pigweed CIPD copy when running
+    # from a repo checkout. The repo-relative lookup must not assume a checkout
+    # layout -- the same file is copied to /opt/fuzzer inside the container,
+    # where parents[4] does not exist.
+    #
+    # It MUST be the same LLVM that built the cov DUT: profdata and
+    # coverage-mapping formats are versioned, and merging with Ubuntu's llvm-20
+    # while the aggregator read the result with pigweed's LLVM 21 reported
+    # "N functions have mismatched data". The campaign image therefore ships the
+    # pigweed tools at /opt/llvm and puts that first on PATH, so this which()
+    # finds the matching version by default.
+    profdata_tool = shutil.which("llvm-profdata")
     if not profdata_tool:
         try:
             cand = Path(__file__).resolve().parents[4] / \
