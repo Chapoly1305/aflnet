@@ -145,7 +145,7 @@ for i in $(seq 1 "${INSTANCES}"); do
   (
     env AFL_SKIP_CPUFREQ=1 AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 AFL_NO_AFFINITY=1 \
         AFL_SKIP_CRASHES=1 AFL_SKIP_CORE_PATTERN=1 \
-        AFLNET="${AFLNET_DIR}" DUT="${FUZZ_DUT}" PORT="${fuzz_port}" DELAY=20000 \
+        AFLNET="${AFLNET_DIR}" DUT="${FUZZ_DUT}" PORT="${fuzz_port}" DELAY=10000 \
         SEEDS="${inst_seeds}" KVS="${inst_kvs}" \
         MATTER_FUZZ_STORAGE_DIR="${inst_storage_dir}" MATTER_FUZZ_KVS_PATH="${inst_kvs}" \
         MATTER_FUZZ_INMEMORY_STORAGE=1 \

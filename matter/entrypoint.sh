@@ -63,7 +63,7 @@ fi
 # the fuzzer as well as any stray DUT.
 reap_dut() {
   # Kill a stale afl-fuzz FIRST. `timeout -s INT` only sets AFL's stop_soon flag
-  # and AFL checks it between execs, so with -t 20000 it can outlive the timeout
+  # and AFL checks it between execs, so with -t 3000 it can outlive the timeout
   # by a long way. A surviving afl-fuzz respawns its own forkserver, which
   # re-binds the port -- so killing only the DUT lets AFL immediately put another
   # one back. This is what made the settle calibration poison the real run.

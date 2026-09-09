@@ -65,17 +65,28 @@ ENV AFLNET=/opt/aflnet AFL_PATH=/opt/aflnet PATH="/opt/aflnet:${PATH}"
 # Defaults for the 24 h x 20-instance TCP campaign.
 #   TRANSPORT=tcp   Matter's spec'd stream framing (Core Spec 4.5/4.5.1) and
 #                   AFLNet's dominant mode (6 of 7 upstream tutorials use tcp://).
-#   DELAY_US=10000  the value 6 of 7 upstream tutorials use.
-#   POLL_MS=20      AFLNet's -W default of 1 ms is too tight to catch the reply,
-#                   and TCP needs more than UDP because the forked child must
-#                   accept() first (measured: fails at W=10, works at W=20).
-#                   Upstream raises -W the same way for its datagram target
-#                   (tutorials/tinydtls uses -W 30).
+#   DELAY_US=10000  ProFuzzBench's dominant value (40 of its 56 -D settings;
+#                   the rest are 200000 and 50000). 5 of the 6 upstream
+#                   tutorials that set -D also use 10000.
+#   POLL_MS=100     ProFuzzBench's value: -W 100 is the only -W it uses (6/6
+#                   occurrences across its subjects). AFLNet's own -W default of
+#                   1 ms is far too tight here -- TCP needs more than UDP because
+#                   the forked child must accept() first (measured on this DUT:
+#                   fails at W=10, works at W=20), so 100 clears the measured
+#                   threshold with margin and matches the reference. -W only
+#                   costs wall clock when the server does NOT reply, so it is the
+#                   generous direction for the baseline.
 #   AFL_ALGO_FLAGS  state-aware mode + the state/seed selection algorithms the
 #                   upstream tutorials use (-q 3 -s 3 -E -R), plus -K/-d.
-#   TEST_TIMEOUT_MS ProFuzzBench uses TEST_TIMEOUT=20000 -> -t 20000+. Our old
-#                   -t 4000+ was 5x tighter and risks scoring a slow but normal
-#                   execution as a timeout on an ASAN DUT.
+#   TEST_TIMEOUT_MS=3000  ProFuzzBench's slow-subject value. Counted across its
+#                   subjects it uses -t 1000+ (6), -t 3000 (3) and -t 3000+ (2)
+#                   -- 3000 is its maximum, and this DUT is at the slow end
+#                   (ASAN, plus a TCP round-trip and a forked child that has to
+#                   settle), so we take the slow value rather than the modal
+#                   1000+. The earlier 20000 was justified by a claim that
+#                   ProFuzzBench uses TEST_TIMEOUT=20000; that is not in the
+#                   benchmark -- verify -t against the subjects before changing
+#                   it again. `+` skips AFL's own timeout calibration.
 # CALIBRATE=0 by default. ProFuzzBench hardcodes -D per target and does not
 # calibrate at runtime, so probing was already a deviation from the reference
 # methodology; worse, it can leave the 20 replicas on different (D, W) values,
@@ -83,11 +94,11 @@ ENV AFLNET=/opt/aflnet AFL_PATH=/opt/aflnet PATH="/opt/aflnet:${PATH}"
 # second afl-fuzz run inside the same container dies at forkserver startup with
 # SIGABRT, so the probe poisoned the run that followed it.
 ENV CALIBRATE=0 \
-    FUZZ_PORT=5560 TRANSPORT=tcp DELAY_US=10000 POLL_MS=20 \
+    FUZZ_PORT=5560 TRANSPORT=tcp DELAY_US=10000 POLL_MS=100 \
     FUZZ_SECONDS=86400 SNAPSHOT_INTERVAL=1800 \
     AFL_ALGO_FLAGS="-d -q 3 -s 3 -E -K -R" \
     DICT=/opt/fuzzer/matter.dict \
-    TEST_TIMEOUT_MS=20000
+    TEST_TIMEOUT_MS=3000
 
 WORKDIR /opt/fuzzer
 ENTRYPOINT ["/opt/fuzzer/entrypoint.sh"]

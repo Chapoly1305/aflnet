@@ -86,5 +86,5 @@ exec "$AFL_BIN" \
   -N "$NETSPEC" \
   -P "$PROTO" -E -K \
   -D "$DELAY" -W "$POLL_MS" \
-  -m none -t 4000+ \
+  -m none -t 3000+ \
   -- "$DUT" --secured-device-port "$PORT" --KVS "$KVS"
