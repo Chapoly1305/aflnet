@@ -52,6 +52,7 @@ SKIPCOUNT=5
 BASE_PORT=5560
 SEEDS_KIND="both"
 SEED_LIMIT=0
+SEED_DIR_OVERRIDE=""
 FUZZ_DUT="${REPO_ROOT}/out/aflnet-dut-fuzz/chip-all-clusters-app"
 COV_DUT="${REPO_ROOT}/out/aflnet-dut-cov/chip-all-clusters-app"
 OUT_DIR="${REPO_ROOT}/out/aflnet-eval-$(date +%Y%m%d-%H%M%S)"
@@ -64,6 +65,7 @@ while [[ $# -gt 0 ]]; do
     --skipcount)       SKIPCOUNT="$2";       shift 2 ;;
     --base-port)       BASE_PORT="$2";       shift 2 ;;
     --seeds)           SEEDS_KIND="$2";      shift 2 ;;
+    --seed-dir)        SEED_DIR_OVERRIDE="$2"; shift 2 ;;
     --seed-limit)      SEED_LIMIT="$2";      shift 2 ;;
     --fuzz-dut)        FUZZ_DUT="$2";        shift 2 ;;
     --cov-dut)         COV_DUT="$2";         shift 2 ;;
@@ -88,6 +90,13 @@ command -v llvm-profdata >/dev/null 2>&1 || {
 CONVERTER="${REPO_ROOT}/examples/fuzzers/eclipsefuzz/stateful/tools/export_corpus_to_aflnet_seeds.py"
 LIMIT_ARG=()
 [[ "${SEED_LIMIT}" -gt 0 ]] && LIMIT_ARG=(--limit "${SEED_LIMIT}")
+if [[ -n "${SEED_DIR_OVERRIDE}" ]]; then
+  # Pre-built .raw seed dir supplied directly; skip corpus conversion.
+  SEED_DIR="${SEED_DIR_OVERRIDE}"
+  SEEDS_KIND="custom:$(basename "${SEED_DIR}")"
+  [[ -d "${SEED_DIR}" && -n "$(ls -A "${SEED_DIR}" 2>/dev/null)" ]] || {
+    echo "[afl-eval] FATAL: --seed-dir empty or missing: ${SEED_DIR}" >&2; exit 1; }
+else
 case "${SEEDS_KIND}" in
   gen)
     SEED_DIR="${MATTER_DIR}/seeds"
@@ -102,6 +111,7 @@ case "${SEEDS_KIND}" in
       echo "[afl-eval] FATAL: seed dir empty" >&2; exit 1; } ;;
   *) echo "[afl-eval] unknown --seeds" >&2; exit 1 ;;
 esac
+fi
 
 NUM_CORES="$(nproc 2>/dev/null || echo '?')"
 mkdir -p "${OUT_DIR}"

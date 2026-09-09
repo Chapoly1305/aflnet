@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate raw on-the-wire Matter (CHIP) request datagrams as AFLNet seeds.
 
-Targets the all-clusters-app DUT built with `matter_fuzz_afl_transport=true`,
+Targets the all-clusters-app DUT built with `matter_fuzz_dut_transport=true`,
 which accepts mutated *plaintext* Matter packets (AES-CCM + MIC verification
 bypassed) and emits *plaintext* responses. See ai_docs/benchmark-fuzzers.md.
 
@@ -14,7 +14,7 @@ Datagram layout produced here (matches extract_requests_matter in aflnet.c):
   Payload Header (plaintext on this DUT, 6 bytes):
     exFlags(1)=0x05(Initiator|NeedsAck)  opcode(1)  exchangeId(2,LE)  protocolId(2,LE)
 
-The fixed session id 0x0001 + fabric 1 are injected by InstallAflTransportSession()
+The fixed session id 0x0001 + fabric 1 are injected by InstallDutTransportSession()
 on the DUT. sessionId must be nonzero so IsEncrypted() routes the packet to
 SecureUnicastMessageDispatch (the cluster path).
 """

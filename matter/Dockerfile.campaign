@@ -23,13 +23,16 @@ RUN apt-get update && \
 # AFLNet driver + helpers (built on the host with the -P MATTER parser).
 COPY aflnet/ /opt/aflnet/
 # DUT binaries.
-#   fuzz = trace-pc-guard (AFL bitmap) + ASAN + deferred forkserver + LLVM
-#          source coverage in CONTINUOUS mode. Continuous mode is what makes
-#          live coverage possible at all here: AFL runs every input in a forked
-#          child and kills it, so a normal profgen build writes nothing: the
-#          counters must be mmap'd into the .profraw instead. Build it with
-#          use_coverage=true matter_fuzz_continuous_coverage=true.
-#   cov  = profgen only; used solely by the Phase-2 replay fallback.
+#   fuzz = trace-pc-guard (AFL bitmap) + ASAN + deferred forkserver, and NO
+#          coverage-measurement instrumentation. Build it with
+#          matter_fuzz_dut_transport=true matter_fuzz_afl_instrument=true and
+#          WITHOUT use_coverage. build_campaign_image.sh refuses an image whose
+#          fuzz DUT carries __llvm_profile_* symbols.
+#   cov  = profgen only (-fprofile-instr-generate -fcoverage-mapping), no ASAN,
+#          no AFL instrumentation, no sancov allowlist. Never fuzzed: it is what
+#          the saved queue is replayed against to produce the coverage curve.
+#          Two builds is the ProFuzzBench / AFLNet reference design, not a
+#          fallback -- see run_docker_campaign.sh header.
 COPY aflnet-chip-all-clusters-app-fuzz /opt/fuzzer/aflnet-chip-all-clusters-app-fuzz
 COPY aflnet-chip-all-clusters-app-cov  /opt/fuzzer/aflnet-chip-all-clusters-app-cov
 # Frozen seed corpus (exported from the EP2 corpus; .raw only).
@@ -38,7 +41,7 @@ COPY seeds/ /opt/fuzzer/seeds/
 # (generate_matter_aflnet_dict.py). ProFuzzBench passes -x for most subjects.
 COPY matter.dict /opt/fuzzer/matter.dict
 COPY entrypoint.sh /opt/fuzzer/entrypoint.sh
-# Phase-2 queue replay: fallback path only (see run_docker_campaign.sh --phase2).
+# Queue replay: the DEFAULT coverage path (run_docker_campaign.sh COV_MODE=phase2).
 COPY phase2_parallel.py /opt/fuzzer/phase2_parallel.py
 
 RUN chmod +x /opt/aflnet/afl-fuzz /opt/fuzzer/aflnet-chip-all-clusters-app-fuzz \
@@ -48,8 +51,10 @@ RUN chmod +x /opt/aflnet/afl-fuzz /opt/fuzzer/aflnet-chip-all-clusters-app-fuzz 
 # AFL host-environment checks that cannot pass inside an unprivileged container:
 #   core_pattern is a host sysctl; cpufreq governor is not visible; CPU affinity
 #   binding fights the container's cpuset.
+# AFL_SKIP_CORE_PATTERN was our own added env var; it is gone now that the
+# baseline is stock AFLNet. Upstream's AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES
+# (afl-fuzz.c:8311, 8339) already covers the container case and is set below.
 ENV AFL_SKIP_CPUFREQ=1 \
-    AFL_SKIP_CORE_PATTERN=1 \
     AFL_NO_AFFINITY=1 \
     AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 \
     AFL_SKIP_CRASHES=1
@@ -74,8 +79,14 @@ ENV AFLNET=/opt/aflnet AFL_PATH=/opt/aflnet PATH="/opt/aflnet:${PATH}"
 #                   threshold with margin and matches the reference. -W only
 #                   costs wall clock when the server does NOT reply, so it is the
 #                   generous direction for the baseline.
-#   AFL_ALGO_FLAGS  state-aware mode + the state/seed selection algorithms the
-#                   upstream tutorials use (-q 3 -s 3 -E -R), plus -K/-d.
+#   AFL_ALGO_FLAGS  state-aware mode plus the state/seed selection algorithms the
+#                   reference uses. Counted across ProFuzzBench: -q 3 (47/47,
+#                   its only value), -s 3 (47, vs -s 1 13), -E (58), -K (58),
+#                   -R (23). -d is AFL's standard skip-deterministic.
+#                   NOT passed: -c <cleanup script>, which 27 ProFuzzBench
+#                   invocations use to reset server state between runs. Every run
+#                   here is a fresh fork of a persistent parent, so there is no
+#                   on-disk server state to reset -- the fork is the cleanup.
 #   TEST_TIMEOUT_MS=3000  ProFuzzBench's slow-subject value. Counted across its
 #                   subjects it uses -t 1000+ (6), -t 3000 (3) and -t 3000+ (2)
 #                   -- 3000 is its maximum, and this DUT is at the slow end

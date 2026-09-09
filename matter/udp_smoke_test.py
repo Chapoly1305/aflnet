@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Send a raw Matter seed datagram to the patched DUT and print the response.
 
-Validates the matter_fuzz_afl_transport DUT end-to-end without AFLNet: the DUT
+Validates the matter_fuzz_dut_transport DUT end-to-end without AFLNet: the DUT
 should accept our plaintext datagram (session injection + Decrypt bypass), run
 the cluster-layer handler, and return a plaintext response (Encrypt bypass).
 
