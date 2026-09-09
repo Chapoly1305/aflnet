@@ -1,0 +1,40 @@
+# Builds AFLNet (with the Matter -P MATTER parser) on Linux.
+#
+# AFLNet hard-depends on graphviz + libcap + Linux fork semantics, so it cannot
+# build on macOS. This image validates that the Matter parser additions compile
+# on Linux and that afl-fuzz accepts `-P MATTER`.
+#
+# Build context must be the aflnet/ repo root (parent of this matter/ dir):
+#   docker build -f matter/Dockerfile.aflnet -t aflnet-matter .
+#
+# Verify -P MATTER is wired:
+#   docker run --rm aflnet-matter sh -c 'echo | ./afl-fuzz -h 2>&1 | head -1; \
+#       ./afl-fuzz -i x -o y -N udp://127.0.0.1/5540 -P MATTER -- /bin/true 2>&1 | head'
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential clang llvm llvm-dev \
+        graphviz-dev libcap-dev \
+        libcurl4-openssl-dev libjson-c-dev \
+        ca-certificates make \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /aflnet
+COPY . /aflnet
+
+# Core afl-fuzz + aflnet (the Matter parser lives in aflnet.c / afl-fuzz.c).
+# AFL_NO_X86=1 skips the legacy afl-gcc x86 assembly self-check so the image
+# builds on arm64 hosts (Apple Silicon). The actual DUT instrumentation uses
+# afl-clang-fast (llvm_mode), which is architecture-independent. On an x86_64
+# campaign host this env var is unnecessary.
+ENV AFL_NO_X86=1
+RUN make clean all \
+    && cp afl-fuzz afl-fuzz-aflnet
+
+# llvm_mode provides afl-clang-fast for instrumenting the DUT.
+RUN make -C llvm_mode || echo "llvm_mode build skipped (set LLVM_CONFIG if needed)"
+
+ENV AFLNET=/aflnet
+ENV AFL_PATH=/aflnet
+ENV PATH="/aflnet:${PATH}"

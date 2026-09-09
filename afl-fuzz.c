@@ -1103,20 +1103,32 @@ HANDLE_RESPONSES:
   }
 
   //wait a bit letting the server to complete its remaining task(s)
+  // Bounded settle: multi-threaded servers (e.g. Matter) may have
+  // background threads that keep writing to trace_bits, causing
+  // has_new_bits to return 2 indefinitely.  Cap at 1000 attempts
+  // (~10 ms at modern CPU speeds) to prevent a livelock.
   memset(session_virgin_bits, 255, MAP_SIZE);
-  while(1) {
-    if (has_new_bits(session_virgin_bits) != 2) break;
+  {
+    u32 settle_attempts = 0;
+    while (settle_attempts < 1000) {
+      if (has_new_bits(session_virgin_bits) != 2) break;
+      settle_attempts++;
+    }
   }
 
   close(sockfd);
 
   if (likely_buggy && false_negative_reduction) return 0;
 
-  if (terminate_child && (child_pid > 0)) kill(child_pid, SIGTERM);
+  /* Snapshot child_pid before sending SIGTERM: a concurrent forkserver read on
+     the main path overwrites the global, causing SIGTERM to hit the forkserver
+     itself (killing the persistent DUT) instead of the forked test child. */
+  s32 term_pid = child_pid;
+  if (terminate_child && (term_pid > 0)) kill(term_pid, SIGTERM);
 
   //give the server a bit more time to gracefully terminate
   while(1) {
-    int status = kill(child_pid, 0);
+    int status = kill(term_pid, 0);
     if ((status != 0) && (errno == ESRCH)) break;
   }
 
@@ -9043,6 +9055,11 @@ int main(int argc, char** argv) {
         } else if (!strcmp(optarg, "FTP")) {
           extract_requests = &extract_requests_ftp;
           extract_response_codes = &extract_response_codes_ftp;
+        } else if (!strcmp(optarg, "MATTERTCP")) {
+          /* Matter over TCP: 4-byte LE length-prefixed framing. Separate from
+             MATTER so the existing UDP baseline stays bit-identical. */
+          extract_requests = &extract_requests_matter_tcp;
+          extract_response_codes = &extract_response_codes_matter_tcp;
         } else if (!strcmp(optarg, "DTLS12")) {
           extract_requests = &extract_requests_dtls12;
           extract_response_codes = &extract_response_codes_dtls12;
@@ -9085,6 +9102,9 @@ int main(int argc, char** argv) {
         }else if (!strcmp(optarg, "SNMP")) {
           extract_requests = &extract_requests_SNMP;
           extract_response_codes = &extract_response_codes_SNMP;
+        } else if (!strcmp(optarg, "MATTER")) {
+          extract_requests = &extract_requests_matter;
+          extract_response_codes = &extract_response_codes_matter;
         } else {
           FATAL("%s protocol is not supported yet!", optarg);
         }

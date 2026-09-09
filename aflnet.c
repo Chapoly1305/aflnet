@@ -1761,6 +1761,437 @@ static unsigned char dtls12_version[2] = {0xFE, 0xFD};
 #define UNKNOWN_MESSAGE_TYPE 0xFF // when the message type cannot be determined because the message is likely encrypted
 #define MALFORMED_MESSAGE_TYPE 0xFE // when message type cannot be determined because the message appears to be malformed
 
+// ---------------------------------------------------------------------------
+// Matter (CHIP) protocol parser.
+//
+// Targets the all-clusters-app DUT built with matter_fuzz_dut_transport=true,
+// which accepts mutated *plaintext* Matter packets and emits *plaintext*
+// responses (AES-CCM + MIC verification bypassed; see ai_docs/benchmark-fuzzers.md).
+//
+// Wire format of one Matter message (over UDP, one datagram):
+//   Message Header (unencrypted):
+//     [0]    Message Flags  (version<<4 | S<<2 | DSIZ)
+//     [1..2] Session ID     (uint16 LE)
+//     [3]    Security Flags
+//     [4..7] Message Counter(uint32 LE)
+//     [+8]   Source Node ID    if S flag (0x04)
+//     [+8/2] Dest Node/Group ID per DSIZ (01->8, 10->2)
+//   Payload (Protocol) Header (plaintext on this DUT):
+//     [0]    Exchange Flags
+//     [1]    Protocol Opcode
+//     [2..3] Exchange ID    (uint16 LE)
+//     [+2]   Vendor ID      if V flag (0x10)  (precedes Protocol ID)
+//     [..]   Protocol ID    (uint16 LE)
+//     [+4]   Ack Counter    if A flag (0x02)
+//   Application payload: one TLV element (anonymous structure for IM).
+//   Requests additionally carry a 16-byte MIC placeholder tail (stripped by the
+//   DUT's Decrypt bypass); responses carry no MIC.
+// ---------------------------------------------------------------------------
+
+#define MATTER_MIC_LEN 16
+
+// Length of the (unencrypted) Matter message header at offset `off`, or -1.
+static int matter_msg_header_len(const unsigned char* buf, unsigned int off, unsigned int size) {
+  if (off + 8 > size) return -1;
+  unsigned char msg_flags = buf[off];
+  int len = 8; // flags(1) + sessionId(2) + secFlags(1) + counter(4)
+  if (msg_flags & 0x04) len += 8;            // Source Node ID present
+  unsigned char dsiz = msg_flags & 0x03;
+  if (dsiz == 0x01) len += 8;                // Destination Node ID
+  else if (dsiz == 0x02) len += 2;           // Destination Group ID
+  // dsiz == 0x03 is reserved per spec (4.4.1.1); treat as no destination
+  // so havoc/corruption of the flags byte doesn't force the fallback path
+  // (entire buffer as one datagram), which can trigger DUT aborts under
+  // the forkserver.
+  if (off + (unsigned int)len > size) return -1;
+  return len;
+}
+
+// Length of the Matter payload (protocol) header at offset `off`, or -1.
+static int matter_payload_header_len(const unsigned char* buf, unsigned int off, unsigned int size) {
+  if (off + 6 > size) return -1;
+  unsigned char ex_flags = buf[off];
+  int len = 6; // exFlags(1) + opcode(1) + exchangeId(2) + protocolId(2)
+  if (ex_flags & 0x10) len += 2;             // Vendor ID present
+  if (ex_flags & 0x02) len += 4;             // Ack counter present (AckMsg flag)
+  if (off + (unsigned int)len > size) return -1;
+  return len;
+}
+
+// Length in bytes of ONE TLV element (recursing into containers) starting at
+// `off`, or -1 if malformed / truncated. Handles Matter TLV control encoding.
+static long matter_tlv_skip(const unsigned char* buf, unsigned int off, unsigned int size) {
+  unsigned int i = off;
+  int depth = 0;
+
+  do {
+    if (i >= size) return -1;
+    unsigned char ctrl = buf[i++];
+    unsigned char elem_type = ctrl & 0x1F;
+
+    if (elem_type == 0x18) {                  // EndOfContainer
+      if (depth == 0) return -1;
+      depth--;
+      continue;
+    }
+
+    // Tag bytes, from the tag-control field (top 3 bits).
+    unsigned int tag_len;
+    switch (ctrl & 0xE0) {
+      case 0x00: tag_len = 0; break;          // Anonymous
+      case 0x20: tag_len = 1; break;          // Context-specific
+      case 0x40: tag_len = 2; break;          // Common profile 2-byte
+      case 0x60: tag_len = 4; break;          // Common profile 4-byte
+      case 0x80: tag_len = 2; break;          // Implicit profile 2-byte
+      case 0xA0: tag_len = 4; break;          // Implicit profile 4-byte
+      case 0xC0: tag_len = 6; break;          // Fully-qualified 6-byte
+      case 0xE0: tag_len = 8; break;          // Fully-qualified 8-byte
+      default: return -1;
+    }
+    i += tag_len;
+    if (i > size) return -1;
+
+    if (elem_type <= 0x07) {                  // signed (0x00-03) / unsigned (0x04-07) int
+      i += (1u << (elem_type & 0x03));
+    } else if (elem_type == 0x08 || elem_type == 0x09) {
+      // boolean false/true: no value bytes
+    } else if (elem_type == 0x0A) {
+      i += 4;                                 // float32
+    } else if (elem_type == 0x0B) {
+      i += 8;                                 // double
+    } else if (elem_type >= 0x0C && elem_type <= 0x13) {
+      // UTF8 (0x0C-0F) / byte (0x10-13) string: length field = 1<<(low2 bits)
+      unsigned int len_field = 1u << ((elem_type - 0x0C) & 0x03);
+      if (i + len_field > size) return -1;
+      unsigned long long str_len = 0;
+      unsigned int k;
+      for (k = 0; k < len_field; k++) str_len |= ((unsigned long long)buf[i + k]) << (8 * k);
+      i += len_field;
+      if (str_len > (unsigned long long)(size - i)) return -1;
+      i += (unsigned int)str_len;
+    } else if (elem_type == 0x14) {
+      // null: no value bytes
+    } else if (elem_type >= 0x15 && elem_type <= 0x17) {
+      depth++;                                // structure / array / list
+    } else {
+      return -1;                              // unknown element type
+    }
+    if (i > size) return -1;
+  } while (depth > 0);
+
+  return (long)(i - off);
+}
+
+// Split a recorded sequence of concatenated Matter request datagrams into
+// per-message regions. AFLNet reads region bytes sequentially, so regions must
+// be contiguous and cover the whole buffer.
+/* ---- Matter over TCP -------------------------------------------------------
+ * Matter frames every message on TCP with a 4-byte little-endian length prefix
+ * (connectedhomeip src/transport/raw/TCP.cpp: kPacketSizeBytes = 4, and
+ * LittleEndian::Write32 on send). Splitting on that prefix means we split
+ * exactly where the DUT splits, instead of re-deriving message boundaries by
+ * parsing headers -- which a mutated buffer defeats: on the 24h UDP run a 28 KB
+ * havoc'd input was mis-split into 890 "messages" averaging 32 bytes, below the
+ * 51-byte minimum for a valid Matter message.
+ *
+ * The prefix is kept INSIDE the region, because AFLNet writes region bytes
+ * verbatim to the socket and the DUT expects the framing. That also leaves the
+ * length field itself reachable by havoc, which is a legitimate target.
+ */
+#define MATTER_TCP_PREFIX_LEN 4
+
+region_t* extract_requests_matter_tcp(unsigned char* buf, unsigned int buf_size, unsigned int* region_count_ref) {
+  unsigned int region_count = 0;
+  region_t *regions = NULL;
+  unsigned int pos = 0;
+#define MATTER_TCP_MAX_REGIONS 8192
+  while (pos + MATTER_TCP_PREFIX_LEN <= buf_size && region_count < MATTER_TCP_MAX_REGIONS) {
+    unsigned int msg_len = (unsigned int)buf[pos]
+                         | ((unsigned int)buf[pos + 1] << 8)
+                         | ((unsigned int)buf[pos + 2] << 16)
+                         | ((unsigned int)buf[pos + 3] << 24);
+    /* The length field is attacker-controlled: havoc mutates it directly. Every
+     * comparison below must therefore be overflow-free.
+     *
+     * The obvious formulation -- compute frame_len = 4 + msg_len, then test
+     * `pos + frame_len > buf_size` -- is NOT. With msg_len = 0xFFFFFFF9 the sum
+     * pos + frame_len wraps to pos - 3, which is <= buf_size, so the bounds
+     * check passes; end_byte then wraps to pos - 4, and AFLNet's
+     * `end_byte - start_byte + 1` yields (u32)(-3) = 4294967293, which
+     * ck_alloc rejects with "Bad alloc request" and abort(). That killed a
+     * 20 x 24 h campaign ~36 minutes in, once havoc had had time to produce
+     * such a length.
+     *
+     * The loop condition guarantees pos + MATTER_TCP_PREFIX_LEN <= buf_size, so
+     * `avail` cannot underflow, and comparing msg_len against it never wraps. */
+    unsigned int avail = buf_size - pos - MATTER_TCP_PREFIX_LEN;
+    unsigned int frame_len;
+    if (msg_len == 0 || msg_len > avail) {
+      /* Zero-length or truncated/mutated frame: take the rest of the buffer so
+       * the region set still covers every byte; the DUT will reject it. */
+      frame_len = buf_size - pos;
+    } else {
+      frame_len = MATTER_TCP_PREFIX_LEN + msg_len;
+    }
+    if (frame_len == 0) break;
+    region_count++;
+    regions = (region_t *)ck_realloc(regions, region_count * sizeof(region_t));
+    /* Invariant: regions are non-empty and non-inverted. AFLNet sizes buffers
+     * with end_byte - start_byte + 1, so an inverted region becomes a ~4 GB
+     * allocation request rather than a visible parse error. */
+    if (frame_len == 0 || pos + frame_len > buf_size) break;
+    regions[region_count - 1].start_byte = pos;
+    regions[region_count - 1].end_byte = pos + frame_len - 1;
+    regions[region_count - 1].state_sequence = NULL;
+    regions[region_count - 1].state_count = 0;
+    pos += frame_len;
+  }
+#undef MATTER_TCP_MAX_REGIONS
+  if ((region_count == 0) && (buf_size > 0)) {
+    regions = (region_t *)ck_realloc(regions, sizeof(region_t));
+    regions[0].start_byte = 0;
+    regions[0].end_byte = buf_size - 1;
+    regions[0].state_sequence = NULL;
+    regions[0].state_count = 0;
+    region_count = 1;
+  }
+  *region_count_ref = region_count;
+  return regions;
+}
+
+/* Responses are framed the same way. De-frame into a contiguous buffer and hand
+ * it to the UDP extractor, so the per-opcode IM status TLV descent lives in one
+ * place only. */
+unsigned int* extract_response_codes_matter_tcp(unsigned char* buf, unsigned int buf_size, unsigned int* state_count_ref) {
+  unsigned char *flat = NULL;
+  unsigned int flat_size = 0;
+  unsigned int pos = 0;
+  unsigned int *out;
+
+  if (buf_size > 0) flat = (unsigned char *)ck_alloc(buf_size);
+  while (pos + MATTER_TCP_PREFIX_LEN <= buf_size) {
+    unsigned int msg_len = (unsigned int)buf[pos]
+                         | ((unsigned int)buf[pos + 1] << 8)
+                         | ((unsigned int)buf[pos + 2] << 16)
+                         | ((unsigned int)buf[pos + 3] << 24);
+    unsigned int avail = buf_size - pos - MATTER_TCP_PREFIX_LEN;
+    if (msg_len == 0) break;
+    if (msg_len > avail) msg_len = avail;   /* truncated / mutated frame */
+    memcpy(flat + flat_size, buf + pos + MATTER_TCP_PREFIX_LEN, msg_len);
+    flat_size += msg_len;
+    pos += MATTER_TCP_PREFIX_LEN + msg_len;
+  }
+  out = extract_response_codes_matter(flat, flat_size, state_count_ref);
+  if (flat) ck_free(flat);
+  return out;
+}
+
+region_t* extract_requests_matter(unsigned char* buf, unsigned int buf_size, unsigned int* region_count_ref) {
+  unsigned int region_count = 0;
+  region_t *regions = NULL;
+  unsigned int pos = 0;
+
+#define MATTER_MAX_REGIONS 8192
+
+  while (pos < buf_size && region_count < MATTER_MAX_REGIONS) {
+    int mh = matter_msg_header_len(buf, pos, buf_size);
+    if (mh < 0) break;
+    int ph = matter_payload_header_len(buf, pos + (unsigned int)mh, buf_size);
+    if (ph < 0) break;
+    long tlv = matter_tlv_skip(buf, pos + (unsigned int)mh + (unsigned int)ph, buf_size);
+    if (tlv < 0) break;
+
+    unsigned int msg_len = (unsigned int)mh + (unsigned int)ph + (unsigned int)tlv + MATTER_MIC_LEN;
+    // Last datagram may lack the MIC placeholder; clamp to the remaining bytes.
+    if (pos + msg_len > buf_size) msg_len = buf_size - pos;
+    if (msg_len == 0) break;
+
+    region_count++;
+    regions = (region_t *)ck_realloc(regions, region_count * sizeof(region_t));
+    regions[region_count - 1].start_byte = pos;
+    regions[region_count - 1].end_byte = pos + msg_len - 1;
+    regions[region_count - 1].state_sequence = NULL;
+    regions[region_count - 1].state_count = 0;
+    pos += msg_len;
+  }
+
+#undef MATTER_MAX_REGIONS
+
+  // Fallback: treat the whole buffer as a single region if parsing failed.
+  if ((region_count == 0) && (buf_size > 0)) {
+    regions = (region_t *)ck_realloc(regions, sizeof(region_t));
+    regions[0].start_byte = 0;
+    regions[0].end_byte = buf_size - 1;
+    regions[0].state_sequence = NULL;
+    regions[0].state_count = 0;
+    region_count = 1;
+  }
+
+  *region_count_ref = region_count;
+  return regions;
+}
+
+// Derive the state-feedback sequence from the DUT's (plaintext) responses. Each
+// message contributes its IM status code (see the note inside: the state is the
+// status ONLY, never protocol/opcode). Messages carrying no decodable IM status
+// -- SecureChannel acks, for instance -- yield the MATTER_NO_STATUS sentinel.
+unsigned int* extract_response_codes_matter(unsigned char* buf, unsigned int buf_size, unsigned int* state_count_ref) {
+  unsigned int *state_sequence = NULL;
+  unsigned int state_count = 0;
+  unsigned int pos = 0;
+
+#define MATTER_MAX_STATES 4096
+#define MATTER_NO_STATUS  0x100  /* sentinel: response carried no decodable IM status */
+  state_count++;
+  state_sequence = (unsigned int *)ck_realloc(state_sequence, state_count * sizeof(unsigned int));
+  state_sequence[state_count - 1] = 0; // initial status code
+
+  while (pos < buf_size && state_count < MATTER_MAX_STATES) {
+    int mh = matter_msg_header_len(buf, pos, buf_size);
+    if (mh < 0) break;
+    int ph = matter_payload_header_len(buf, pos + (unsigned int)mh, buf_size);
+    if (ph < 0) break;
+
+    unsigned int ph_off  = pos + (unsigned int)mh;
+    unsigned char ex_flags = buf[ph_off];
+    unsigned char opcode   = buf[ph_off + 1];
+    unsigned int pid_off   = ph_off + 4 + ((ex_flags & 0x10) ? 2 : 0);
+    unsigned int protocol_id = (unsigned int)buf[pid_off] | ((unsigned int)buf[pid_off + 1] << 8);
+    // State feedback is the IM status code ONLY — never opcode/protocol, so the
+    // baseline does not gain message-type state granularity beyond the status.
+    unsigned int status_code = MATTER_NO_STATUS;
+
+    // For IM responses, extract the application-level status from the TLV payload.
+    // Each response type has a specific TLV structure per 4.11 (Message Definitions)
+    // in the Matter Interaction Model spec. We navigate by context tags.
+    unsigned int im_status = 0;
+    unsigned int tlv_start = ph_off + (unsigned int)ph;
+    int found = 0;
+    if (protocol_id == 0x0001 && tlv_start + 2 < buf_size) {
+      switch (opcode) {
+
+      case 0x01: // StatusResponse: StatusResponseMessage ctx0=uint8 Status (NOT StatusIB)
+        if (buf[tlv_start] == 0x15) {
+          unsigned int s = tlv_start + 1;
+          while (s < tlv_start + 64 && s + 2 < buf_size) {
+            if (buf[s] == 0x24 && buf[s+1] == 0x00) { im_status = buf[s+2]; found = 1; break; }
+            s++;
+          }
+        }
+        break;
+
+      case 0x09: // InvokeResponse (4.11.4): InvokeResponseMessage -> ctx1:array of InvokeResponseIB
+                 // InvokeResponseIB (struct): ctx0:CommandDataIB OR ctx1:CommandStatusIB
+                 // CommandStatusIB (struct): ctx0:CommandPathIB, ctx1:StatusIB
+                 // StatusIB (struct): ctx0:uint8 Status
+        if (buf[tlv_start] == 0x15) {  // outer struct
+          unsigned int s = tlv_start + 1;
+          while (s < tlv_start + 128 && s + 2 < buf_size) {
+            // InvokeResponseMessage.kInvokeResponses = ctx1 ARRAY (0x36 0x01)
+            if (buf[s] == 0x36 && buf[s+1] == 0x01) {  // ctx1 array of InvokeResponseIB
+              unsigned int ir = (buf[s+2] == 0x15) ? s + 3 : s + 2;
+              while (ir < s + 128 && ir + 2 < buf_size) {
+                if (buf[ir] == 0x35 && buf[ir+1] == 0x01) {  // ctx1 CommandStatusIB (struct)
+                  unsigned int cs = (buf[ir+2] == 0x15) ? ir + 3 : ir + 2;
+                  while (cs < ir + 128 && cs + 2 < buf_size) {
+                    if (buf[cs] == 0x35 && buf[cs+1] == 0x01) {  // ctx1 StatusIB (struct)
+                      unsigned int st = (buf[cs+2] == 0x15) ? cs + 3 : cs + 2;
+                      while (st < cs + 32 && st + 2 < buf_size) {
+                        if (buf[st] == 0x24 && buf[st+1] == 0x00) {
+                          im_status = buf[st+2]; found = 1; break;
+                        }
+                        st++;
+                      }
+                      break;
+                    }
+                    cs++;
+                  }
+                  break;
+                }
+                ir++;
+              }
+              break;
+            }
+            s++;
+          }
+        }
+        break;
+
+      case 0x07: // WriteResponse: struct{ctx0:AttributeStatusIBs}
+                 // AttributeStatusIBs: array of struct{ctx0:Path, ctx1:StatusIB}
+                 // StatusIB: struct{ctx0:uint8 Status}
+        if (buf[tlv_start] == 0x15) {
+          unsigned int s = tlv_start + 1;
+          while (s < tlv_start + 64 && s + 2 < buf_size) {
+            if (buf[s] == 0x36 && buf[s+1] == 0x00) {  // ctx0 array
+              unsigned int ai = (buf[s+2] == 0x15) ? s + 3 : s + 2;
+              while (ai < s + 64 && ai + 2 < buf_size) {
+                if (buf[ai] == 0x35 && buf[ai+1] == 0x01) {  // ctx1 StatusIB (struct)
+                  unsigned int st = (buf[ai+2] == 0x15) ? ai + 3 : ai + 2;
+                  while (st < ai + 32 && st + 2 < buf_size) {
+                    if (buf[st] == 0x24 && buf[st+1] == 0x00) {
+                      im_status = buf[st+2]; found = 1; break;
+                    }
+                    st++;
+                  }
+                  break;
+                }
+                ai++;
+              }
+              break;
+            }
+            s++;
+          }
+        }
+        break;
+
+      case 0x05: // ReportData (4.11.3): ctx1:AttributeReportIBs array -> struct -> ctx2:AttributeStatusIB -> ctx1:StatusIB
+        if (buf[tlv_start] == 0x15) {
+          unsigned int s = tlv_start + 1;
+          while (s < tlv_start + 200 && s + 3 < buf_size) {
+            if (buf[s] == 0x35 && buf[s+1] == 0x01) {  // ctx1 StatusIB (struct)
+              unsigned int st = (buf[s+2] == 0x15) ? s + 3 : s + 2;
+              while (st < s + 32 && st + 2 < buf_size) {
+                if (buf[st] == 0x24 && buf[st+1] == 0x00) {
+                  im_status = buf[st+2]; found = 1; break;
+                }
+                st++;
+              }
+              if (found) break;
+            }
+            s++;
+          }
+        }
+        break;
+      }
+    }
+    if (found) {
+      status_code = im_status & 0xFF;
+    }
+    state_count++;
+    state_sequence = (unsigned int *)ck_realloc(state_sequence, state_count * sizeof(unsigned int));
+    state_sequence[state_count - 1] = status_code;
+
+    // Advance to the next message. Responses carry no MIC. SecureChannel
+    // standalone acks (protocol 0x0000, opcode 0x10) have no application payload.
+    unsigned int adv;
+    if (protocol_id == 0x0000 && opcode == 0x10) {
+      adv = (unsigned int)mh + (unsigned int)ph;
+    } else {
+      long tlv = matter_tlv_skip(buf, pos + (unsigned int)mh + (unsigned int)ph, buf_size);
+      if (tlv < 0) break;
+      adv = (unsigned int)mh + (unsigned int)ph + (unsigned int)tlv;
+    }
+    if (adv == 0) break;
+    pos += adv;
+  }
+
+#undef MATTER_MAX_STATES
+#undef MATTER_NO_STATUS
+  *state_count_ref = state_count;
+  return state_sequence;
+}
+
 region_t *extract_requests_dtls12(unsigned char* buf, unsigned int buf_size, unsigned int* region_count_ref) {
   unsigned int byte_count = 0;
   unsigned int region_count = 0;
