@@ -18,7 +18,7 @@
 #   docker0 address pool pressure at 32+ containers. Nothing is published to the
 #   host, so there is no host-side port to collide with.
 #
-# Coverage is collected by QUEUE REPLAY (default, COV_MODE=phase2) -- the
+# Coverage is collected by QUEUE REPLAY (default, COV_MODE=replay) -- the
 #   ProFuzzBench / AFLNet reference design. The target is compiled twice: the
 #   fuzz DUT carries AFL instrumentation and NO profiling, and a second profgen
 #   DUT is never fuzzed, only replayed against. After fuzzing,
@@ -42,8 +42,9 @@
 #   profgen binary too; scoring one system live and the other by replay would
 #   hand the live one credit for discarded executions.
 #
-#   --live restores the old in-campaign profraw sampling (needs a fuzz DUT built
-#   with use_coverage=true matter_fuzz_continuous_coverage=true).
+#   --live is REJECTED by this image: the sampler is not installed and the fuzz
+#   DUT carries no profiling. Restoring it needs both put back, plus the
+#   comparability cost above. --phase2 is kept as an alias of --replay.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -61,20 +62,20 @@ POLL_MS=100
 CALIBRATE=0
 INTERVAL=1800
 SCOPE=clusters
-COV_MODE=phase2
+COV_MODE=replay
 # ProFuzzBench runs each repetition in its own container with --cpus=1
 # (profuzzbench_exec_common.sh). Pinning matters at 20-way: without it the
 # instances contend and neither the throughput nor the comparison is reproducible.
 CPUS="1"
 OUT_DIR="${REPO_ROOT}/out/aflnet-docker-campaign-$(date +%Y%m%d-%H%M%S)"
-PHASE2_WORKERS=16
+REPLAY_WORKERS=16
 
 usage() { cat <<'U'
 Usage: run_docker_campaign.sh [--instances 20] [--fuzz-seconds 86400]
          [--image TAG] [--out-dir DIR] [--transport tcp|udp]
-         [--delay-us 10000] [--poll-ms 20] [--calibrate]
+         [--delay-us 10000] [--poll-ms 100] [--calibrate]
          [--interval 1800] [--scope clusters|sdk] [--cpus N.N]
-         [--phase2] [--live] [--phase2-workers 16] [--no-coverage]
+         [--replay] [--replay-workers 16] [--no-coverage]
 U
 }
 while [[ $# -gt 0 ]]; do
@@ -90,9 +91,21 @@ while [[ $# -gt 0 ]]; do
     --interval)       INTERVAL="${2:?}";      shift 2 ;;
     --scope)          SCOPE="${2:?}";         shift 2 ;;
     --cpus)           CPUS="${2:?}";          shift 2 ;;
-    --phase2-workers) PHASE2_WORKERS="${2:?}"; shift 2 ;;
-    --phase2)         COV_MODE=phase2;        shift ;;
-    --live)           COV_MODE=live;          shift ;;
+    --replay-workers|--phase2-workers) REPLAY_WORKERS="${2:?}"; shift 2 ;;
+    --replay)         COV_MODE=replay;        shift ;;
+    --phase2)         COV_MODE=replay;        shift ;;   # legacy alias
+    --live)           # Reject at parse time, not after a full fuzzing budget.
+                      # This image carries no sampler (profraw_snapshotter.py is
+                      # not installed) and the fuzz DUT is built WITHOUT
+                      # use_coverage -- build_campaign_image.sh refuses one that
+                      # has it. Restoring live sampling means rebuilding that DUT
+                      # with use_coverage=true matter_fuzz_continuous_coverage=true,
+                      # putting the sampler back, and accepting the comparability
+                      # cost in this script's header.
+                      echo "ERROR: --live is not supported by this image: the fuzz DUT" >&2
+                      echo "       carries no profiling and no profraw sampler is installed." >&2
+                      echo "       Use the default queue replay (--replay)." >&2
+                      exit 2 ;;
     --no-coverage)    COV_MODE=none;          shift ;;
     -h|--help)        usage; exit 0 ;;
     *) echo "ERROR: unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -107,13 +120,9 @@ mkdir -p "${OUT_DIR}"
 
 RUN_ID="$(basename "${OUT_DIR}")"
 COV_DUT_IN_IMAGE=/opt/fuzzer/aflnet-chip-all-clusters-app-cov
-# llvm-cov must read the profile with the SAME binary that produced it, so the
-# live path scores against the fuzz DUT, not the profgen replay DUT.
-if [[ "${COV_MODE}" == "live" ]]; then
-  HOST_SCORING_DUT="${REPO_ROOT}/out/aflnet-dut-fuzz/chip-all-clusters-app"
-else
-  HOST_SCORING_DUT="${REPO_ROOT}/out/aflnet-dut-cov/chip-all-clusters-app"
-fi
+# llvm-cov must read the profile with the SAME binary that produced it, and the
+# only binary that produces one is the profgen replay DUT.
+HOST_SCORING_DUT="${REPO_ROOT}/out/aflnet-dut-cov/chip-all-clusters-app"
 
 {
   echo "started=$(date -Iseconds)"
@@ -134,7 +143,7 @@ fi
   docker image inspect "${IMAGE}" --format '{{range $k,$v := .Config.Labels}}{{$k}}={{$v}}
 {{end}}' | sed '/^$/d'
 } > "${OUT_DIR}/eval-meta.txt"
-# The aggregator and phase2 resolve the coverage binary from this key.
+# The aggregator and the replay step resolve the coverage binary from this key.
 echo "coverage_binary=${COV_DUT_IN_IMAGE}" >> "${OUT_DIR}/eval-meta.txt"
 
 echo "[afl-docker] ${INSTANCES} instances x ${FUZZ_SECONDS}s -> ${OUT_DIR}"
@@ -175,15 +184,8 @@ if [[ "${COV_MODE}" == "none" ]]; then
   echo "[afl-docker] coverage skipped"; exit 0
 fi
 
-if [[ "${COV_MODE}" == "live" ]]; then
-  total_snaps=$(ls "${OUT_DIR}"/instance-*/snapshots/snapshot-*s.profdata 2>/dev/null | wc -l)
-  echo "[afl-docker] live coverage: ${total_snaps} snapshots already on disk (interval=${INTERVAL}s)"
-  [[ "${total_snaps}" -gt 0 ]] || {
-    echo "[afl-docker] no live snapshots -- check instance-*/snapshotter.log; \
-re-run with --phase2 to fall back to queue replay" >&2; exit 1; }
-else
-  # Fallback: reconstruct a curve by replaying each queue through the profgen DUT.
-  echo "[afl-docker] phase2 replay (interval=${INTERVAL}s)..."
+# Build the curve by replaying each instance's queue through the profgen DUT.
+echo "[afl-docker] queue replay (interval=${INTERVAL}s)..."
   docker run --rm --init --network none \
     --user "$(id -u):$(id -g)" \
     --entrypoint python3 \
@@ -191,12 +193,11 @@ else
     -v "${OUT_DIR}:/campaign" \
     "${IMAGE}" /opt/fuzzer/phase2_parallel.py \
       --eval-dir /campaign --cov-dut "${COV_DUT_IN_IMAGE}" \
-      --interval "${INTERVAL}" --workers "${PHASE2_WORKERS}" \
-    || echo "[afl-docker] phase2 failed (rerun that docker run by hand)" >&2
-  for tl in "${OUT_DIR}"/instance-*/timeline.csv; do
-    [[ -f "${tl}" ]] && sed -i "s#/campaign#${OUT_DIR}#g" "${tl}"
-  done
-fi
+      --interval "${INTERVAL}" --workers "${REPLAY_WORKERS}" \
+    || echo "[afl-docker] queue replay failed (rerun that docker run by hand)" >&2
+for tl in "${OUT_DIR}"/instance-*/timeline.csv; do
+  [[ -f "${tl}" ]] && sed -i "s#/campaign#${OUT_DIR}#g" "${tl}"
+done
 
 echo "[afl-docker] aggregating (scope=${SCOPE})..."
 PIGWEED_BIN="${REPO_ROOT}/.environment/cipd/packages/pigweed/bin"
