@@ -16,7 +16,7 @@ REPO_ROOT="$(cd "${AFLNET_DIR}/../../.." && pwd)"
 IMAGE_TAG="aflnet-matter-campaign:local"
 FUZZ_DUT="${REPO_ROOT}/out/aflnet-dut-fuzz/chip-all-clusters-app"
 COV_DUT="${REPO_ROOT}/out/aflnet-dut-cov/chip-all-clusters-app"
-SEED_DIR="${REPO_ROOT}/out/aflnet-seeds-tcp-20260906"
+SEED_DIR="${REPO_ROOT}/out/aflnet-seeds-tcp-20260908"
 NO_CACHE=0
 
 usage() { cat <<'U'
@@ -118,7 +118,11 @@ BUILD_ARGS=(--tag "${IMAGE_TAG}"
   --label "aflnet.seed_set_sha256=${SEED_SHA}"
   --label "aflnet.seed_transport=${SEED_TRANSPORT}"
   --label "aflnet.dict_tokens=$(grep -c '=' "${SCRIPT_DIR}/matter.dict")"
-  --label "aflnet.repo_commit=$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)")
+  --label "aflnet.repo_commit=$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)"
+  # The AFLNet commit is the provenance that matters for the baseline: which
+  # upstream AFLNet, plus our -P MATTER parser on top.
+  --label "aflnet.aflnet_commit=$(git -C "${AFLNET_DIR}" rev-parse HEAD 2>/dev/null || echo unknown)"
+  --label "aflnet.aflnet_upstream_base=$(git -C "${AFLNET_DIR}" rev-parse --short 62d63a5 2>/dev/null || echo unknown)")
 [[ "${NO_CACHE}" -eq 1 ]] && BUILD_ARGS+=(--no-cache)
 
 docker build "${BUILD_ARGS[@]}" "${STAGE}"
