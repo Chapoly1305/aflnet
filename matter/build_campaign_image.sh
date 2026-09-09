@@ -11,7 +11,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 AFLNET_DIR="$(dirname "${SCRIPT_DIR}")"
-REPO_ROOT="$(cd "${AFLNET_DIR}/../../.." && pwd)"
+# Default assumes aflnet/ sits at <repo>/examples/fuzzers/aflnet. That is wrong
+# when this script runs from a git worktree of the submodule, where the path
+# above resolves outside the EclipseFuzz tree and aflnet.repo_commit degrades
+# to "unknown". Override with --repo-root in that case.
+REPO_ROOT="$(cd "${AFLNET_DIR}/../../.." 2>/dev/null && pwd || echo "")"
 
 IMAGE_TAG="aflnet-matter-campaign:local"
 FUZZ_DUT="${REPO_ROOT}/out/aflnet-dut-fuzz/chip-all-clusters-app"
@@ -21,7 +25,7 @@ NO_CACHE=0
 
 usage() { cat <<'U'
 Usage: build_campaign_image.sh [--tag TAG] [--fuzz-dut PATH] [--cov-dut PATH]
-                               [--seeds DIR] [--no-cache]
+                               [--seeds DIR] [--repo-root DIR] [--no-cache]
 U
 }
 while [[ $# -gt 0 ]]; do
@@ -30,6 +34,10 @@ while [[ $# -gt 0 ]]; do
     --fuzz-dut) FUZZ_DUT="${2:?}";  shift 2 ;;
     --cov-dut)  COV_DUT="${2:?}";   shift 2 ;;
     --seeds)    SEED_DIR="${2:?}";  shift 2 ;;
+    --repo-root) REPO_ROOT="${2:?}"
+                 FUZZ_DUT="${REPO_ROOT}/out/aflnet-dut-fuzz/chip-all-clusters-app"
+                 COV_DUT="${REPO_ROOT}/out/aflnet-dut-cov/chip-all-clusters-app"
+                 shift 2 ;;
     --no-cache) NO_CACHE=1; shift ;;
     -h|--help)  usage; exit 0 ;;
     *) echo "ERROR: unknown argument: $1" >&2; usage >&2; exit 2 ;;
