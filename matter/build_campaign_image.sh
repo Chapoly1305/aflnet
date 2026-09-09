@@ -103,6 +103,25 @@ fuzz_strings="$(strings -a "${FUZZ_DUT}" 2>/dev/null | grep -c 'SIG_AFL_DEFER_FO
 cov_syms="$(nm -C "${COV_DUT}" 2>/dev/null || true)"
 grep -qw -- __llvm_profile_write_file <<<"${cov_syms}" || {
   echo "ERROR: ${COV_DUT} is not a profgen build" >&2; exit 1; }
+# The cov DUT must be built with -funique-internal-linkage-names. Without it,
+# internal-linkage PGO names are "<file basename>:<mangled>" and the SDK's 20
+# same-named CodegenIntegration.cpp anonymous-namespace delegates collide, so
+# llvm-cov silently drops those records ("N functions have mismatched data").
+#
+# Checked against the build dir's args.gn, NOT the binary: the .__uniq.<hash>
+# suffix the flag appends lives only in the PGO names, which sit zlib-compressed
+# in __llvm_prf_names -- nm, strings and readelf all find nothing (verified).
+cov_args="$(dirname "${COV_DUT}")/args.gn"
+if [[ -f "${cov_args}" ]]; then
+  grep -q 'unique-internal-linkage-names' "${cov_args}" || {
+    echo "ERROR: ${COV_DUT} was built without -funique-internal-linkage-names \
+(checked ${cov_args}). Rebuild with \
+target_cflags=[\"-funique-internal-linkage-names\"] -- see matter/README.md." >&2; exit 1; }
+else
+  echo "WARNING: no args.gn beside ${COV_DUT}; cannot verify \
+-funique-internal-linkage-names. Coverage may silently drop the SDK's colliding \
+CodegenIntegration.cpp delegates." >&2
+fi
 for t in llvm-profdata llvm-cov; do
   [[ -x "${LLVM_BIN}/${t}" ]] || { echo "ERROR: ${LLVM_BIN}/${t} missing -- pass --llvm-bin \
 (or --repo-root) pointing at the toolchain that built the cov DUT" >&2; exit 1; }

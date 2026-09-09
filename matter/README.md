@@ -80,7 +80,15 @@ ninja -C out/aflnet-dut-fuzz chip-all-clusters-app
 #     instrumentation, no ASAN, no sancov allowlist (the reported scope is
 #     applied by llvm-cov's path filter at report time, not baked into the
 #     binary), so one neutral binary can score every compared fuzzer.
-gn gen out/aflnet-dut-cov --args="${CHIP_ARGS} is_asan=false use_coverage=true coverage_allowlist_file=\"\" matter_fuzz_dut_transport=true"
+#     -funique-internal-linkage-names is required, not optional: clang's driver
+#     always passes -main-file-name <basename>, so under -fprofile-instr-generate
+#     an internal-linkage function's PGO name is "<basename>:<mangled>". The SDK
+#     has 27 files called CodegenIntegration.cpp, 20 of which define the same
+#     anonymous-namespace IntegrationDelegate::{Create,Find}Registration, so
+#     those collide on one PGO name with different structure hashes and llvm-cov
+#     drops them ("N functions have mismatched data"). The flag appends a
+#     module-unique .__uniq.<hash> suffix and the collision disappears.
+gn gen out/aflnet-dut-cov --args="${CHIP_ARGS} is_asan=false use_coverage=true coverage_allowlist_file=\"\" matter_fuzz_dut_transport=true target_cflags=[\"-funique-internal-linkage-names\"]"
 ninja -C out/aflnet-dut-cov chip-all-clusters-app
 
 # 3. Generate seeds and run (PORT avoids a concurrent EP2 campaign on 5540):
