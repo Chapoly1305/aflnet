@@ -21,6 +21,7 @@ IMAGE_TAG="aflnet-matter-campaign:local"
 FUZZ_DUT="${REPO_ROOT}/out/aflnet-dut-fuzz/chip-all-clusters-app"
 COV_DUT="${REPO_ROOT}/out/aflnet-dut-cov/chip-all-clusters-app"
 SEED_DIR="${REPO_ROOT}/out/aflnet-seeds-tcp-20260908"
+DICT="${SCRIPT_DIR}/matter.dict"
 # The image must carry the SAME llvm-profdata/llvm-cov that built the cov DUT.
 # Ubuntu's llvm-20 packages merged the profdata while the host aggregator read
 # it with pigweed's LLVM 21, which produced "N functions have mismatched data".
@@ -29,7 +30,7 @@ NO_CACHE=0
 
 usage() { cat <<'U'
 Usage: build_campaign_image.sh [--tag TAG] [--fuzz-dut PATH] [--cov-dut PATH]
-                               [--seeds DIR] [--repo-root DIR] [--llvm-bin DIR]
+                               [--seeds DIR] [--dict PATH] [--repo-root DIR] [--llvm-bin DIR]
                                [--no-cache]
 U
 }
@@ -39,6 +40,7 @@ while [[ $# -gt 0 ]]; do
     --fuzz-dut) FUZZ_DUT="${2:?}";  shift 2 ;;
     --cov-dut)  COV_DUT="${2:?}";   shift 2 ;;
     --seeds)    SEED_DIR="${2:?}";  shift 2 ;;
+    --dict)     DICT="${2:?}";      shift 2 ;;
     --repo-root) REPO_ROOT="${2:?}"
                  FUZZ_DUT="${REPO_ROOT}/out/aflnet-dut-fuzz/chip-all-clusters-app"
                  COV_DUT="${REPO_ROOT}/out/aflnet-dut-cov/chip-all-clusters-app"
@@ -140,8 +142,8 @@ cp "${FUZZ_DUT}" "${STAGE}/aflnet-chip-all-clusters-app-fuzz"
 cp "${COV_DUT}"  "${STAGE}/aflnet-chip-all-clusters-app-cov"
 find "${SEED_DIR}" -maxdepth 1 -name '*.raw' -exec cp {} "${STAGE}/seeds/" \;
 cp "${SCRIPT_DIR}/entrypoint.sh" "${SCRIPT_DIR}/phase2_parallel.py" "${STAGE}/"
-[[ -f "${SCRIPT_DIR}/matter.dict" ]] || { echo "ERROR: matter.dict missing -- run generate_matter_aflnet_dict.py" >&2; exit 1; }
-cp "${SCRIPT_DIR}/matter.dict" "${STAGE}/"
+[[ -f "${DICT}" ]] || { echo "ERROR: dictionary missing: ${DICT}" >&2; exit 1; }
+cp "${DICT}" "${STAGE}/matter.dict"
 cp "${SCRIPT_DIR}/Dockerfile.campaign" "${STAGE}/Dockerfile"
 
 sha() { sha256sum "$1" | cut -d' ' -f1; }
@@ -157,7 +159,7 @@ BUILD_ARGS=(--tag "${IMAGE_TAG}"
   --label "aflnet.seed_count=${n_seeds}"
   --label "aflnet.seed_set_sha256=${SEED_SHA}"
   --label "aflnet.seed_transport=${SEED_TRANSPORT}"
-  --label "aflnet.dict_tokens=$(grep -c '=' "${SCRIPT_DIR}/matter.dict")"
+  --label "aflnet.dict_tokens=$(grep -c '=' "${DICT}")"
   --label "aflnet.llvm_version=${LLVM_VER}"
   --label "aflnet.repo_commit=$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)"
   # The AFLNet commit is the provenance that matters for the baseline: which
