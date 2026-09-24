@@ -71,9 +71,10 @@ ENV ASAN_OPTIONS=abort_on_error=1:symbolize=0:detect_leaks=0:allocator_may_retur
 ENV DEBUGINFOD_URLS=""
 ENV AFLNET=/opt/aflnet AFL_PATH=/opt/aflnet PATH="/opt/llvm:/opt/aflnet:${PATH}"
 # Every container has its own netns, so this port never collides.
-# Defaults for the 24 h x 20-instance TCP campaign.
-#   TRANSPORT=tcp   Matter's spec'd stream framing (Core Spec 4.5/4.5.1) and
-#                   AFLNet's dominant mode (6 of 7 upstream tutorials use tcp://).
+# Campaign defaults.
+#   TRANSPORT=udp   Matter's operational transport and the framing of the
+#                   corpus/derived-afl seeds, whose timed Write/Invoke carry the
+#                   MRP ack the DUT requires (TCP sessions do not use MRP).
 #   DELAY_US=10000  ProFuzzBench's dominant value (40 of its 56 -D settings;
 #                   the rest are 200000 and 50000). 5 of the 6 upstream
 #                   tutorials that set -D also use 10000.
@@ -109,7 +110,7 @@ ENV AFLNET=/opt/aflnet AFL_PATH=/opt/aflnet PATH="/opt/llvm:/opt/aflnet:${PATH}"
 # second afl-fuzz run inside the same container dies at forkserver startup with
 # SIGABRT, so the probe poisoned the run that followed it.
 ENV CALIBRATE=0 \
-    FUZZ_PORT=5560 TRANSPORT=tcp DELAY_US=10000 POLL_MS=100 \
+    FUZZ_PORT=5560 TRANSPORT=udp DELAY_US=10000 POLL_MS=100 \
     FUZZ_SECONDS=86400 SNAPSHOT_INTERVAL=1800 \
     AFL_ALGO_FLAGS="-d -q 3 -s 3 -E -K -R" \
     DICT=/opt/fuzzer/matter.dict \

@@ -11,9 +11,10 @@ Benchmark integration of [AFLNet](https://github.com/aflnet/aflnet) against the
 | `udp_smoke_test.py` | Send one seed to a running DUT and print/parse the response |
 | `test_matter_parser.c` | Standalone unit test for `extract_*_matter` (any platform) |
 | `Dockerfile.aflnet` | Build AFLNet (+ Matter parser) on Linux |
-| `run_campaign.sh` | Drive a single campaign |
-| `run_coverage_eval_campaign.sh` | N independent instances + coverage-over-time |
-| `seeds/` | Hand-rolled seed corpus (used with `--seeds gen`) |
+| `build_campaign_image.sh` / `Dockerfile.campaign` / `entrypoint.sh` | Campaign image: afl-fuzz, both DUTs, `corpus/derived-afl` seeds + dictionary |
+| `run_docker_campaign.sh` | N independent instances, one container each, then queue-replay coverage |
+| `phase2_parallel.py` | Queue replay against the cov DUT (runs inside the image) |
+| `seeds/` | Hand-rolled seeds for the quick validation below |
 
 ## How the pieces fit
 
@@ -58,43 +59,22 @@ Expected DUT log on receipt:
 [DMG] Building Reports for ReadHandler ...
 ```
 
-## Full campaign (Linux host)
+## Full campaign (Docker only)
 
 ```bash
-# 1. Build AFLNet + Matter parser natively
-cd ..            # aflnet/ root
-make clean all
+# 1. Build the two DUTs, afl-fuzz and the rest (from the EclipseFuzz repo root).
+#    This is the ProFuzzBench / AFLNet reference design: the target is compiled
+#    once for fuzzing (out/aflnet-dut-fuzz: AFL bitmap + ASAN, no profiling) and
+#    once for coverage (out/aflnet-dut-cov: profgen only, with
+#    -funique-internal-linkage-names), and the coverage curve comes from
+#    replaying the queue against the second binary. step1.2 holds the args.
+./step1.2_build_campaign_executables.sh
 
-# 2. Build the TWO DUTs (from the EclipseFuzz repo root). This is the
-#    ProFuzzBench / AFLNet reference design: the target is compiled once for
-#    fuzzing and a second time for coverage, and the coverage curve comes from
-#    replaying the queue against the second binary -- never from profiling the
-#    fuzz binary. See run_docker_campaign.sh header for why.
-CHIP_ARGS='is_clang=true is_libfuzzer=false chip_build_all_clusters_app=true chip_crypto="mbedtls" chip_enable_ble=false chip_config_network_layer_ble=false chip_enable_wifi=true chip_enable_openthread=true chip_enable_icd_server=true chip_enable_icd_lit=true chip_logging=false chip_enable_access_restrictions=true chip_enable_software_diagnostics_trigger=true chip_enable_wifi_diagnostics_trigger=true chip_enable_smoke_co_trigger=true chip_enable_boolean_state_configuration_trigger=true chip_enable_commodity_tariff_trigger=true chip_enable_energy_evse_trigger=true chip_enable_energy_reporting_trigger=true chip_enable_water_heater_management_trigger=true chip_enable_device_energy_management_trigger=true'
+# 2. Seeds: corpus/derived-afl (UDP datagram chains, timed Write/Invoke already
+#    carry the DUT's MRP ack) and corpus/derived-afl.dict come from step3.1.
 
-# 2a. fuzz DUT: AFL bitmap + ASAN, and NO coverage-measurement instrumentation.
-gn gen out/aflnet-dut-fuzz --args="${CHIP_ARGS} is_asan=true matter_fuzz_dut_transport=true matter_fuzz_afl_instrument=true"
-ninja -C out/aflnet-dut-fuzz chip-all-clusters-app
-
-# 2b. cov DUT: profgen only -- never fuzzed, only replayed against. No AFL
-#     instrumentation, no ASAN, no sancov allowlist (the reported scope is
-#     applied by llvm-cov's path filter at report time, not baked into the
-#     binary), so one neutral binary can score every compared fuzzer.
-#     -funique-internal-linkage-names is required, not optional: clang's driver
-#     always passes -main-file-name <basename>, so under -fprofile-instr-generate
-#     an internal-linkage function's PGO name is "<basename>:<mangled>". The SDK
-#     has 27 files called CodegenIntegration.cpp, 20 of which define the same
-#     anonymous-namespace IntegrationDelegate::{Create,Find}Registration, so
-#     those collide on one PGO name with different structure hashes and llvm-cov
-#     drops them ("N functions have mismatched data"). The flag appends a
-#     module-unique .__uniq.<hash> suffix and the collision disappears.
-gn gen out/aflnet-dut-cov --args="${CHIP_ARGS} is_asan=false use_coverage=true coverage_allowlist_file=\"\" matter_fuzz_dut_transport=true target_cflags=[\"-funique-internal-linkage-names\"]"
-ninja -C out/aflnet-dut-cov chip-all-clusters-app
-
-# 3. Generate seeds and run (PORT avoids a concurrent EP2 campaign on 5540):
-cd examples/fuzzers/aflnet/matter && python3 gen_matter_seeds.py -o seeds
-AFLNET=../.. DUT=../../../../out/aflnet-dut-fuzz/chip-all-clusters-app \
-  PORT=5560 ./run_campaign.sh /tmp/aflnet-out
+# 3. Package and run: step4.1 = build_campaign_image.sh + run_docker_campaign.sh
+./step4.1_aflnet_eval.sh --instances 10 --fuzz-seconds 3600 --interval 300
 ```
 
 ### Instrumentation (trace-pc-guard, not the afl-clang-fast wrapper)
@@ -125,11 +105,11 @@ Full design: `ai_docs/benchmark-fuzzers.md` §Instrumentation & forkserver.
 ### Known Linux-host caveats
 
 - The host's `core_pattern` pipes to an external handler and the CPU governor is
-  `powersave`; `run_campaign.sh` exports `AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES`,
-  `AFL_SKIP_CPUFREQ`, `AFL_NO_AFFINITY` to proceed without root.
-- The per-run `DELAY` settle (default 1 s) keeps `execs_per_sec ≈ 1`. Sweep it
-  down toward the minimum reliable value to raise throughput (too small ⇒ AFLNet
-  aborts with "No server states detected").
+  `powersave`; the campaign image sets `AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES`,
+  `AFL_SKIP_CPUFREQ`, `AFL_NO_AFFINITY` so AFLNet proceeds without root.
+- The image runs with `-D 10000` (10 ms settle) and `-W 100` (100 ms response
+  window), about 3 exec/s per instance (A5000, 2026-09-24). A settle that is too
+  short makes AFLNet abort with "No server states detected".
 
 ## Seed / packet format
 

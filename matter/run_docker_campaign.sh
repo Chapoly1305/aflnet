@@ -56,7 +56,7 @@ DASHBOARD="${REPO_ROOT}/examples/fuzzers/eclipsefuzz/stateful/tools/generate_cov
 IMAGE="aflnet-matter-campaign:local"
 INSTANCES=20
 FUZZ_SECONDS=86400
-TRANSPORT=tcp
+TRANSPORT=udp
 DELAY_US=10000
 POLL_MS=100
 CALIBRATE=0
@@ -69,10 +69,12 @@ COV_MODE=replay
 CPUS="1"
 OUT_DIR="${REPO_ROOT}/out/aflnet-docker-campaign-$(date +%Y%m%d-%H%M%S)"
 REPLAY_WORKERS=16
+SEEDS_DIR="${REPO_ROOT}/corpus/derived-afl"   # step3.1; timed acks included
 
 usage() { cat <<'U'
 Usage: run_docker_campaign.sh [--instances 20] [--fuzz-seconds 86400]
          [--image TAG] [--out-dir DIR] [--transport tcp|udp]
+         [--seeds DIR]
          [--delay-us 10000] [--poll-ms 100] [--calibrate]
          [--interval 1800] [--scope clusters|sdk] [--cpus N.N]
          [--replay] [--replay-workers 16] [--no-coverage]
@@ -84,6 +86,7 @@ while [[ $# -gt 0 ]]; do
     --fuzz-seconds)   FUZZ_SECONDS="${2:?}";  shift 2 ;;
     --image)          IMAGE="${2:?}";         shift 2 ;;
     --out-dir)        OUT_DIR="${2:?}";       shift 2 ;;
+    --seeds)          SEEDS_DIR="${2:?}";     shift 2 ;;
     --delay-us)       DELAY_US="${2:?}";      shift 2 ;;
     --poll-ms)        POLL_MS="${2:?}";       shift 2 ;;
     --transport)      TRANSPORT="${2:?}";     shift 2 ;;
@@ -116,7 +119,29 @@ command -v docker >/dev/null || { echo "ERROR: docker required" >&2; exit 1; }
 docker image inspect "${IMAGE}" >/dev/null 2>&1 || {
   echo "ERROR: image ${IMAGE} not found -- run build_campaign_image.sh" >&2; exit 1; }
 [[ -d "${OUT_DIR}" ]] && { echo "ERROR: out dir exists: ${OUT_DIR}" >&2; exit 1; }
+[[ -d "${SEEDS_DIR}" ]] || { echo "ERROR: seed dir missing: ${SEEDS_DIR}" >&2; exit 1; }
 mkdir -p "${OUT_DIR}"
+INPUT_SEEDS="${OUT_DIR}/inputs/seeds"
+mkdir -p "${INPUT_SEEDS}"
+find "${SEEDS_DIR}" -maxdepth 1 -type f -name '*.raw' -exec cp --preserve=mode,timestamps {} "${INPUT_SEEDS}/" \;
+SEED_COUNT="$(find "${INPUT_SEEDS}" -maxdepth 1 -type f -name '*.raw' | wc -l)"
+[[ "${SEED_COUNT}" -gt 0 ]] || { echo "ERROR: no raw AFLNet seeds in ${SEEDS_DIR}" >&2; exit 1; }
+FIRST_SEED="$(find "${INPUT_SEEDS}" -maxdepth 1 -type f -name '*.raw' -print -quit)"
+DECLARED_LEN="$(od -An -tu4 -N4 "${FIRST_SEED}" | tr -d ' ')"
+ACTUAL_LEN="$(stat -c%s "${FIRST_SEED}")"
+if [[ "${TRANSPORT}" == tcp ]] && (( DECLARED_LEN + 4 != ACTUAL_LEN )); then
+  echo "ERROR: TCP campaign requires length-prefixed TCP seeds; ${SEEDS_DIR} is not TCP framed" >&2
+  exit 1
+fi
+if [[ "${TRANSPORT}" == udp ]] && (( DECLARED_LEN + 4 == ACTUAL_LEN )); then
+  echo "ERROR: UDP campaign requires bare datagrams; ${SEEDS_DIR} is TCP framed" >&2
+  exit 1
+fi
+(
+  cd "${INPUT_SEEDS}"
+  find . -maxdepth 1 -type f -name '*.raw' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+) > "${OUT_DIR}/inputs/seeds.sha256"
+chmod -R a-w "${OUT_DIR}/inputs"
 
 RUN_ID="$(basename "${OUT_DIR}")"
 COV_DUT_IN_IMAGE=/opt/fuzzer/aflnet-chip-all-clusters-app-cov
@@ -137,6 +162,8 @@ HOST_SCORING_DUT="${REPO_ROOT}/out/aflnet-dut-cov/chip-all-clusters-app"
   echo "snapshot_interval=${INTERVAL}"
   echo "execution_mode=docker-netns-per-instance"
   echo "coverage_mode=${COV_MODE}"
+  echo "seed_source=${SEEDS_DIR}"
+  echo "seed_count=${SEED_COUNT}"
   echo "network=none"
   echo "host=$(hostname)"
   echo "host_cpus=$(nproc)"
@@ -163,6 +190,8 @@ for i in $(seq 1 "${INSTANCES}"); do
     -e CALIBRATE="${CALIBRATE}" -e INSTANCE="instance-${idx}" \
     -e TRANSPORT="${TRANSPORT}" -e POLL_MS="${POLL_MS}" \
     -e SNAPSHOT_INTERVAL="${INTERVAL}" \
+    -e SEEDS_DIR=/workdir/seeds \
+    -v "${INPUT_SEEDS}:/workdir/seeds:ro" \
     -v "${inst}:/workdir/output" \
     "${IMAGE}" >/dev/null
   NAMES+=("${name}")

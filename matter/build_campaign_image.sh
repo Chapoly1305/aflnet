@@ -20,8 +20,8 @@ REPO_ROOT="$(cd "${AFLNET_DIR}/../../.." 2>/dev/null && pwd || echo "")"
 IMAGE_TAG="aflnet-matter-campaign:local"
 FUZZ_DUT="${REPO_ROOT}/out/aflnet-dut-fuzz/chip-all-clusters-app"
 COV_DUT="${REPO_ROOT}/out/aflnet-dut-cov/chip-all-clusters-app"
-SEED_DIR="${REPO_ROOT}/out/aflnet-seeds-tcp-20260908"
-DICT="${SCRIPT_DIR}/matter.dict"
+SEED_DIR="${REPO_ROOT}/corpus/derived-afl"     # step3.1 output (UDP, timed acks)
+DICT="${REPO_ROOT}/corpus/derived-afl.dict"   # built from those same seeds
 # The image must carry the SAME llvm-profdata/llvm-cov that built the cov DUT.
 # Ubuntu's llvm-20 packages merged the profdata while the host aggregator read
 # it with pigweed's LLVM 21, which produced "N functions have mismatched data".
