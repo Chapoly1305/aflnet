@@ -2015,33 +2015,45 @@ region_t* extract_requests_matter(unsigned char* buf, unsigned int buf_size, uns
     pos += msg_len;
   }
 
-#undef MATTER_MAX_REGIONS
-
-  // Fallback: treat the whole buffer as a single region if parsing failed.
-  if ((region_count == 0) && (buf_size > 0)) {
-    regions = (region_t *)ck_realloc(regions, sizeof(region_t));
-    regions[0].start_byte = 0;
-    regions[0].end_byte = buf_size - 1;
-    regions[0].state_sequence = NULL;
-    regions[0].state_count = 0;
-    region_count = 1;
+  // AFLNet sends only returned regions. Preserve a malformed/truncated tail
+  // as an opaque datagram so corruption cannot silently remove input bytes.
+  // At the region limit, fold the tail into the last region instead of
+  // exceeding the bound. Valid messages before a parse failure stay separate.
+  if (pos < buf_size) {
+    if (region_count < MATTER_MAX_REGIONS) {
+      regions = (region_t *)ck_realloc(regions, (region_count + 1) * sizeof(region_t));
+      regions[region_count].start_byte = pos;
+      regions[region_count].end_byte = buf_size - 1;
+      regions[region_count].state_sequence = NULL;
+      regions[region_count].state_count = 0;
+      region_count++;
+    } else {
+      regions[region_count - 1].end_byte = buf_size - 1;
+    }
   }
+
+#undef MATTER_MAX_REGIONS
 
   *region_count_ref = region_count;
   return regions;
 }
 
+#include "matter/matter_status_parser.h"
+
 // Derive the state-feedback sequence from the DUT's (plaintext) responses. Each
-// message contributes its IM status code (see the note inside: the state is the
-// status ONLY, never protocol/opcode). Messages carrying no decodable IM status
-// -- SecureChannel acks, for instance -- yield the MATTER_NO_STATUS sentinel.
+// message contributes an injective encoding of its IM status code (see the note
+// inside: the state is the status ONLY, never protocol/opcode). State 0 is
+// reserved by AFLNet for the synthetic initial state, while Matter Success is
+// also status 0, so wire statuses 0..255 map to states 1..256. Messages carrying
+// no decodable IM status -- SecureChannel acks, for instance -- yield 257.
 unsigned int* extract_response_codes_matter(unsigned char* buf, unsigned int buf_size, unsigned int* state_count_ref) {
   unsigned int *state_sequence = NULL;
   unsigned int state_count = 0;
   unsigned int pos = 0;
 
 #define MATTER_MAX_STATES 4096
-#define MATTER_NO_STATUS  0x100  /* sentinel: response carried no decodable IM status */
+#define MATTER_STATUS_STATE_BASE 1
+#define MATTER_NO_STATUS_STATE  0x101  /* response carried no decodable IM status */
   state_count++;
   state_sequence = (unsigned int *)ck_realloc(state_sequence, state_count * sizeof(unsigned int));
   state_sequence[state_count - 1] = 0; // initial status code
@@ -2059,135 +2071,32 @@ unsigned int* extract_response_codes_matter(unsigned char* buf, unsigned int buf
     unsigned int protocol_id = (unsigned int)buf[pid_off] | ((unsigned int)buf[pid_off + 1] << 8);
     // State feedback is the IM status code ONLY — never opcode/protocol, so the
     // baseline does not gain message-type state granularity beyond the status.
-    unsigned int status_code = MATTER_NO_STATUS;
+    unsigned int status_code = MATTER_NO_STATUS_STATE;
 
-    // For IM responses, extract the application-level status from the TLV payload.
-    // Each response type has a specific TLV structure per 4.11 (Message Definitions)
-    // in the Matter Interaction Model spec. We navigate by context tags.
-    unsigned int im_status = 0;
     unsigned int tlv_start = ph_off + (unsigned int)ph;
-    int found = 0;
-    if (protocol_id == 0x0001 && tlv_start + 2 < buf_size) {
-      switch (opcode) {
-
-      case 0x01: // StatusResponse: StatusResponseMessage ctx0=uint8 Status (NOT StatusIB)
-        if (buf[tlv_start] == 0x15) {
-          unsigned int s = tlv_start + 1;
-          while (s < tlv_start + 64 && s + 2 < buf_size) {
-            if (buf[s] == 0x24 && buf[s+1] == 0x00) { im_status = buf[s+2]; found = 1; break; }
-            s++;
-          }
-        }
-        break;
-
-      case 0x09: // InvokeResponse (4.11.4): InvokeResponseMessage -> ctx1:array of InvokeResponseIB
-                 // InvokeResponseIB (struct): ctx0:CommandDataIB OR ctx1:CommandStatusIB
-                 // CommandStatusIB (struct): ctx0:CommandPathIB, ctx1:StatusIB
-                 // StatusIB (struct): ctx0:uint8 Status
-        if (buf[tlv_start] == 0x15) {  // outer struct
-          unsigned int s = tlv_start + 1;
-          while (s < tlv_start + 128 && s + 2 < buf_size) {
-            // InvokeResponseMessage.kInvokeResponses = ctx1 ARRAY (0x36 0x01)
-            if (buf[s] == 0x36 && buf[s+1] == 0x01) {  // ctx1 array of InvokeResponseIB
-              unsigned int ir = (buf[s+2] == 0x15) ? s + 3 : s + 2;
-              while (ir < s + 128 && ir + 2 < buf_size) {
-                if (buf[ir] == 0x35 && buf[ir+1] == 0x01) {  // ctx1 CommandStatusIB (struct)
-                  unsigned int cs = (buf[ir+2] == 0x15) ? ir + 3 : ir + 2;
-                  while (cs < ir + 128 && cs + 2 < buf_size) {
-                    if (buf[cs] == 0x35 && buf[cs+1] == 0x01) {  // ctx1 StatusIB (struct)
-                      unsigned int st = (buf[cs+2] == 0x15) ? cs + 3 : cs + 2;
-                      while (st < cs + 32 && st + 2 < buf_size) {
-                        if (buf[st] == 0x24 && buf[st+1] == 0x00) {
-                          im_status = buf[st+2]; found = 1; break;
-                        }
-                        st++;
-                      }
-                      break;
-                    }
-                    cs++;
-                  }
-                  break;
-                }
-                ir++;
-              }
-              break;
-            }
-            s++;
-          }
-        }
-        break;
-
-      case 0x07: // WriteResponse: struct{ctx0:AttributeStatusIBs}
-                 // AttributeStatusIBs: array of struct{ctx0:Path, ctx1:StatusIB}
-                 // StatusIB: struct{ctx0:uint8 Status}
-        if (buf[tlv_start] == 0x15) {
-          unsigned int s = tlv_start + 1;
-          while (s < tlv_start + 64 && s + 2 < buf_size) {
-            if (buf[s] == 0x36 && buf[s+1] == 0x00) {  // ctx0 array
-              unsigned int ai = (buf[s+2] == 0x15) ? s + 3 : s + 2;
-              while (ai < s + 64 && ai + 2 < buf_size) {
-                if (buf[ai] == 0x35 && buf[ai+1] == 0x01) {  // ctx1 StatusIB (struct)
-                  unsigned int st = (buf[ai+2] == 0x15) ? ai + 3 : ai + 2;
-                  while (st < ai + 32 && st + 2 < buf_size) {
-                    if (buf[st] == 0x24 && buf[st+1] == 0x00) {
-                      im_status = buf[st+2]; found = 1; break;
-                    }
-                    st++;
-                  }
-                  break;
-                }
-                ai++;
-              }
-              break;
-            }
-            s++;
-          }
-        }
-        break;
-
-      case 0x05: // ReportData (4.11.3): ctx1:AttributeReportIBs array -> struct -> ctx2:AttributeStatusIB -> ctx1:StatusIB
-        if (buf[tlv_start] == 0x15) {
-          unsigned int s = tlv_start + 1;
-          while (s < tlv_start + 200 && s + 3 < buf_size) {
-            if (buf[s] == 0x35 && buf[s+1] == 0x01) {  // ctx1 StatusIB (struct)
-              unsigned int st = (buf[s+2] == 0x15) ? s + 3 : s + 2;
-              while (st < s + 32 && st + 2 < buf_size) {
-                if (buf[st] == 0x24 && buf[st+1] == 0x00) {
-                  im_status = buf[st+2]; found = 1; break;
-                }
-                st++;
-              }
-              if (found) break;
-            }
-            s++;
-          }
-        }
-        break;
-      }
-    }
-    if (found) {
-      status_code = im_status & 0xFF;
+    unsigned int adv;
+    if (protocol_id == 0x0000 && opcode == 0x10) {
+      adv = (unsigned int)mh + (unsigned int)ph;
+    } else {
+      long tlv = matter_tlv_skip(buf, tlv_start, buf_size);
+      if (tlv < 0) break;
+      unsigned int im_status;
+      if (protocol_id == 0x0001 &&
+          matter_im_status(buf, tlv_start, tlv_start + (unsigned int)tlv, opcode, &im_status))
+        status_code = MATTER_STATUS_STATE_BASE + im_status;
+      adv = (unsigned int)mh + (unsigned int)ph + (unsigned int)tlv;
     }
     state_count++;
     state_sequence = (unsigned int *)ck_realloc(state_sequence, state_count * sizeof(unsigned int));
     state_sequence[state_count - 1] = status_code;
 
-    // Advance to the next message. Responses carry no MIC. SecureChannel
-    // standalone acks (protocol 0x0000, opcode 0x10) have no application payload.
-    unsigned int adv;
-    if (protocol_id == 0x0000 && opcode == 0x10) {
-      adv = (unsigned int)mh + (unsigned int)ph;
-    } else {
-      long tlv = matter_tlv_skip(buf, pos + (unsigned int)mh + (unsigned int)ph, buf_size);
-      if (tlv < 0) break;
-      adv = (unsigned int)mh + (unsigned int)ph + (unsigned int)tlv;
-    }
     if (adv == 0) break;
     pos += adv;
   }
 
 #undef MATTER_MAX_STATES
-#undef MATTER_NO_STATUS
+#undef MATTER_NO_STATUS_STATE
+#undef MATTER_STATUS_STATE_BASE
   *state_count_ref = state_count;
   return state_sequence;
 }
@@ -2793,7 +2702,7 @@ int net_send(int sockfd, struct timeval timeout, char *mem, unsigned int len) {
 }
 
 int net_recv(int sockfd, struct timeval timeout, int poll_w, char **response_buf, unsigned int *len) {
-  char temp_buf[1000];
+  char temp_buf[65536]; /* receive one complete UDP datagram */
   int n;
   struct pollfd pfd[1];
   pfd[0].fd = sockfd;

@@ -1,0 +1,7 @@
+# Keep llvm-cov's profile/object integrity warning meaningful by omitting only
+# source files that leave dead coverage mappings after ELF symbol resolution.
+# Both files are outside the src/app/clusters/ scoring denominator.
+[clang]
+source:*generic-callback-stubs.cpp=forbid
+source:*CustomCSRResponse.cpp=forbid
+default:allow
