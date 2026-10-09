@@ -43,7 +43,7 @@ if [[ "${1:-}" == --instance ]]; then
     --env FUZZ_SECONDS="${FUZZ_SECONDS}" \
     --env SNAPSHOT_INTERVAL="${SNAPSHOT_INTERVAL}" \
     --env CALIBRATION_GUARD_SECONDS="${AF_CALIBRATION_GUARD_SECONDS:-172800}" \
-    "${rootfs}"
+    "${rootfs}" /opt/fuzzer/entrypoint.sh
 fi
 
 [[ $# == 2 ]] || die "usage: sbatch --export=NONE $0 IMAGE.sif CAMPAIGN_DIR"
