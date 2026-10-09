@@ -49,6 +49,7 @@
 #include <string.h>
 #include <time.h>
 #include <errno.h>
+#include <limits.h>
 #include <signal.h>
 #include <dirent.h>
 #include <ctype.h>
@@ -189,6 +190,8 @@ EXP_ST u64 total_crashes,             /* Total number of crashes          */
            total_execs,               /* Total execve() calls             */
            slowest_exec_ms,           /* Slowest testcase non hang in ms  */
            start_time,                /* Unix start time (ms)             */
+           active_fuzz_start_time,    /* After initial dry run (ms)       */
+           active_fuzz_budget_ms,     /* Optional active-time budget      */
            last_path_time,            /* Time for most recent path (ms)   */
            last_crash_time,           /* Time for most recent crash (ms)  */
            last_hang_time,            /* Time for most recent hang (ms)   */
@@ -3762,6 +3765,12 @@ static void perform_dry_run(char** argv) {
 
   if (cal_failures) {
 
+    /* Paper campaigns must not silently omit an initial seed. Keep upstream
+       skip behavior available outside this opt-in contract. */
+    if (getenv("AFL_REQUIRE_CLEAN_INITIAL_CORPUS"))
+      FATAL("Initial corpus calibration rejected %u/%u test cases",
+            cal_failures, queued_paths);
+
     if (cal_failures == queued_paths)
       FATAL("All test cases time out%s, giving up!",
             skip_crashes ? " or crash" : "");
@@ -3775,6 +3784,7 @@ static void perform_dry_run(char** argv) {
 
   }
 
+  SAYF("INITIAL_CORPUS_CALIBRATION_OK seeds=%u failures=0\n", queued_paths);
   OKF("All test cases processed.");
 
 }
@@ -4302,6 +4312,8 @@ static void write_stats_file(double bitmap_cvg, double stability, double eps) {
 
   fprintf(f, "start_time        : %llu\n"
              "last_update       : %llu\n"
+             "active_fuzz_start_time : %llu\n"
+             "active_fuzz_seconds : %llu\n"
              "fuzzer_pid        : %u\n"
              "cycles_done       : %llu\n"
              "execs_done        : %llu\n"
@@ -4329,7 +4341,10 @@ static void write_stats_file(double bitmap_cvg, double stability, double eps) {
              "target_mode       : %s%s%s%s%s%s%s\n"
              "command_line      : %s\n"
              "slowest_exec_ms   : %llu\n",
-             start_time / 1000, get_cur_time() / 1000, getpid(),
+             start_time / 1000, get_cur_time() / 1000,
+             active_fuzz_start_time / 1000,
+             active_fuzz_start_time ? (get_cur_time() - active_fuzz_start_time) / 1000 : 0,
+             getpid(),
              queue_cycle ? (queue_cycle - 1) : 0, total_execs, eps,
              queued_paths, queued_favored, queued_discovered, queued_imported,
              max_depth, current_entry, pending_favored, pending_not_fuzzed,
@@ -5406,6 +5421,13 @@ static void show_init_stats(void) {
 EXP_ST u8 common_fuzz_stuff(char** argv, u8* out_buf, u32 len) {
 
   u8 fault;
+
+  /* One fuzz_one() may run many mutations before the outer budget check. */
+  if (active_fuzz_budget_ms && active_fuzz_start_time &&
+      get_cur_time() - active_fuzz_start_time >= active_fuzz_budget_ms) {
+    stop_soon = 2;
+    return 1;
+  }
 
   if (post_handler) {
 
@@ -9278,6 +9300,21 @@ int main(int argc, char** argv) {
     if (stop_soon) goto stop_fuzzing;
   }
 
+  {
+    u8 *budget = getenv("AFL_ACTIVE_FUZZ_SECONDS");
+    if (budget) {
+      char *end;
+      unsigned long long seconds;
+      errno = 0;
+      seconds = strtoull((char *)budget, &end, 10);
+      if (errno || !*budget || *end || !seconds || seconds > ULLONG_MAX / 1000)
+        FATAL("Invalid AFL_ACTIVE_FUZZ_SECONDS value: '%s'", budget);
+      active_fuzz_budget_ms = seconds * 1000;
+    }
+    active_fuzz_start_time = get_cur_time();
+    write_stats_file(0, 0, 0);
+  }
+
   if (state_aware_mode) {
 
     if (state_ids_count == 0) {
@@ -9286,6 +9323,12 @@ int main(int argc, char** argv) {
 
     while (1) {
       u8 skipped_fuzz;
+
+      if (active_fuzz_budget_ms &&
+          get_cur_time() - active_fuzz_start_time >= active_fuzz_budget_ms) {
+        stop_soon = 2;
+        break;
+      }
 
       struct queue_entry *selected_seed = NULL;
       while(!selected_seed || selected_seed->region_count == 0) {
@@ -9341,6 +9384,12 @@ int main(int argc, char** argv) {
     while (1) {
 
       u8 skipped_fuzz;
+
+      if (active_fuzz_budget_ms &&
+          get_cur_time() - active_fuzz_start_time >= active_fuzz_budget_ms) {
+        stop_soon = 2;
+        break;
+      }
 
       cull_queue();
 

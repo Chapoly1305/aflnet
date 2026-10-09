@@ -25,10 +25,10 @@ def sha(path):
 
 
 def replay_context(cov_dut, tool, poll_ms=100, storage_mode="file"):
-    if storage_mode not in ("file", "memory"):
-        raise ValueError(f"invalid storage mode: {storage_mode}")
-    delegate = "linux-file-backed" if storage_mode == "file" else "test-in-memory"
-    platform_config = "memory-default" if storage_mode == "file" else "memory-explicit"
+    if storage_mode != "file":
+        raise ValueError(f"AFLNet requires file storage; got {storage_mode}")
+    delegate = "linux-file-backed"
+    platform_config = "memory-default"
     return {"schema": "aflnet-queue-replay.v6", "coverage_kind": "saved_queue_replay",
             "cov_dut_sha256": sha(cov_dut), "profdata_tool_sha256": sha(tool),
             "worker_sha256": sha(__file__), "storage_mode": storage_mode,
@@ -190,10 +190,7 @@ def _replay(task):
         work = Path(tempfile.mkdtemp(prefix="p2par-"))
         env = dict(os.environ, LLVM_PROFILE_FILE=str(work / "p.profraw"),
                    MATTER_FUZZ_STORAGE_DIR=str(work), MATTER_FUZZ_KVS_PATH=str(work / "k"))
-        if _STORAGE_MODE == "memory":
-            env["MATTER_FUZZ_INMEMORY_STORAGE"] = "1"
-        else:
-            env.pop("MATTER_FUZZ_INMEMORY_STORAGE", None)
+        env.pop("MATTER_FUZZ_INMEMORY_STORAGE", None)
         with open(out + ".dut.log", "wb") as log:
             process = subprocess.Popen([_COV_DUT, "--secured-device-port", str(_PORT),
                                         "--KVS", str(work / "k")],

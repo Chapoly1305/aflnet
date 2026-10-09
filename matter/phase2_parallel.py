@@ -7,8 +7,9 @@ processes (one dedicated UDP port each). The cheap, order-dependent part
 (cumulative llvm-profdata merge into snapshot-<elapsed>s.profdata, in seed-mtime
 order) stays sequential.
 
-  elapsed = seed_mtime - fuzzer_stats:start_time   (relative seconds; the
-            aggregator reads the filename number as elapsed directly)
+  Hopper --require-active-time: elapsed = seed_mtime - fuzz_start_epoch,
+  clipped into [0, requested_fuzz_seconds]. The initial dry-run seeds belong
+  to t=0. Missing or conflicting active clock evidence is fatal.
 
 Two bucketing modes decide WHEN a cumulative snapshot is emitted:
 
@@ -39,18 +40,20 @@ from replay_snapshots import publish_snapshots, snapshot_plan
 
 def meta_get(meta_path, key):
     if not os.path.isfile(meta_path): return None
-    for line in open(meta_path):
-        if line.startswith(key + "="):
-            return line.split("=", 1)[1].strip()
+    with open(meta_path, encoding="utf-8") as stream:
+        for line in stream:
+            if line.startswith(key + "="):
+                return line.split("=", 1)[1].strip()
     return None
 
 def start_time_for(afl_out):
     fs = os.path.join(afl_out, "fuzzer_stats")
     if os.path.isfile(fs):
-        for line in open(fs):
-            if line.startswith("start_time"):
-                try: return int(line.split(":", 1)[1].strip())
-                except Exception: pass
+        with open(fs, encoding="utf-8") as stream:
+            for line in stream:
+                if line.startswith("start_time"):
+                    try: return int(line.split(":", 1)[1].strip())
+                    except Exception: pass
     # fallback: earliest queue mtime
     q = os.path.join(afl_out, "replayable-queue")
     fts = [os.path.getmtime(f) for f in glob.glob(os.path.join(q, "id:*"))]
@@ -61,24 +64,67 @@ def duration_for(afl_out, start, seeds):
     the newest queue entry as fallback. Bounds how many fixed windows exist."""
     fs = os.path.join(afl_out, "fuzzer_stats")
     if os.path.isfile(fs):
-        for line in open(fs):
-            if line.startswith("last_update"):
-                try:
-                    d = int(line.split(":", 1)[1].strip()) - start
-                    if d > 0:
-                        return d
-                except Exception:
-                    pass
+        with open(fs, encoding="utf-8") as stream:
+            for line in stream:
+                if line.startswith("last_update"):
+                    try:
+                        d = int(line.split(":", 1)[1].strip()) - start
+                        if d > 0:
+                            return d
+                    except Exception:
+                        pass
     return max((int(os.path.getmtime(s)) - start for s in seeds), default=0)
 
 
+def active_clock_for(inst_dir, afl_out):
+    """Return the sealed post-calibration time zero and requested duration."""
+    run_env = os.path.join(inst_dir, "run.env")
+    stats = os.path.join(afl_out, "fuzzer_stats")
+    if not os.path.isfile(run_env) or not os.path.isfile(stats):
+        raise RuntimeError(f"{inst_dir}: active-time run.env or fuzzer_stats missing")
+
+    def required_int(value, label):
+        if value is None or not value.isdecimal():
+            raise RuntimeError(f"{inst_dir}: missing or invalid {label}={value!r}")
+        return int(value)
+
+    stat_values = {}
+    with open(stats, encoding="utf-8") as stream:
+        for line in stream:
+            if ":" in line:
+                key, value = line.split(":", 1)
+                stat_values[key.strip()] = value.strip()
+    start = required_int(meta_get(run_env, "fuzz_start_epoch"), "fuzz_start_epoch")
+    end = required_int(meta_get(run_env, "fuzz_end_epoch"), "fuzz_end_epoch")
+    requested = required_int(meta_get(run_env, "requested_fuzz_seconds"), "requested_fuzz_seconds")
+    observed = required_int(meta_get(run_env, "observed_fuzz_seconds"), "observed_fuzz_seconds")
+    calibration = required_int(meta_get(run_env, "initial_calibration_seconds"), "initial_calibration_seconds")
+    wall_start = required_int(stat_values.get("start_time"), "stats start_time")
+    stats_start = required_int(stat_values.get("active_fuzz_start_time"), "stats active_fuzz_start_time")
+    stats_observed = required_int(stat_values.get("active_fuzz_seconds"), "stats active_fuzz_seconds")
+    stats_end = required_int(stat_values.get("last_update"), "stats last_update")
+    if (not start or not requested or start != stats_start or end != stats_end
+            or observed != stats_observed or calibration != start - wall_start):
+        raise RuntimeError(f"{inst_dir}: inconsistent active-time run.env and fuzzer_stats")
+    if end < start or observed < max(1, requested - 5) or observed > end - start + 1:
+        raise RuntimeError(f"{inst_dir}: incomplete or impossible active-time budget")
+    if (meta_get(run_env, "status") != "ok"
+            or meta_get(run_env, "initial_calibration_status") != "ok"
+            or meta_get(run_env, "initial_calibration_failures") != "0"):
+        raise RuntimeError(f"{inst_dir}: initial corpus calibration was not proven clean")
+    return start, requested
+
+
 def process_instance(inst_dir, cov_dut, profdata_tool, workers, base_port, n_snapshots,
-                     interval=1800):
+                     interval=1800, require_active_time=False):
     afl_out = os.path.join(inst_dir, "afl-out")
     queue = os.path.join(afl_out, "replayable-queue")
     if not os.path.isdir(queue):
         raise RuntimeError(f"no queue under {inst_dir}")
-    start = start_time_for(afl_out)
+    if require_active_time:
+        start, duration = active_clock_for(inst_dir, afl_out)
+    else:
+        start = start_time_for(afl_out)
     # seeds sorted by mtime (discovery order)
     seeds = sorted(glob.glob(os.path.join(queue, "id:*")), key=lambda p: (os.path.getmtime(p), os.path.basename(p)))
     if not seeds:
@@ -91,8 +137,8 @@ def process_instance(inst_dir, cov_dut, profdata_tool, workers, base_port, n_sna
     if poll_ms < 0:
         raise RuntimeError(f"{inst_dir}: poll_ms must be nonnegative")
     storage_mode = meta_get(os.path.join(inst_dir, "run.env"), "storage_mode")
-    if storage_mode not in ("file", "memory"):
-        raise RuntimeError(f"{inst_dir}: invalid or missing storage_mode={storage_mode!r}")
+    if storage_mode != "file":
+        raise RuntimeError(f"{inst_dir}: AFLNet requires file storage; got {storage_mode!r}")
     snap_dir = os.path.join(inst_dir, "snapshots"); os.makedirs(snap_dir, exist_ok=True)
     pd_dir = os.path.join(inst_dir, "_perseed_pd"); os.makedirs(pd_dir, exist_ok=True)
     timeline = os.path.join(inst_dir, "timeline.csv")
@@ -138,8 +184,12 @@ def process_instance(inst_dir, cov_dut, profdata_tool, workers, base_port, n_sna
             f"{name}: {len(pending)} seed replay(s) still failed after 3 attempts"
         )
 
-    elapsed = [max(0, int(os.path.getmtime(s)) - start) for s in seeds]
-    plan = snapshot_plan(elapsed, duration_for(afl_out, start, seeds), interval, n_snapshots)
+    if require_active_time:
+        elapsed = [min(duration, max(0, int(os.path.getmtime(s)) - start)) for s in seeds]
+    else:
+        elapsed = [max(0, int(os.path.getmtime(s)) - start) for s in seeds]
+        duration = duration_for(afl_out, start, seeds)
+    plan = snapshot_plan(elapsed, duration, interval, n_snapshots)
     raw_records = [cached_raw_record(task, context) for task in all_tasks]
     n_snap = publish_snapshots(inst_dir, raw_records, plan, profdata_tool, context)
     print(f"[p2par] {name}: {n_snap} snapshots written -> {snap_dir}", flush=True)
@@ -156,6 +206,8 @@ def main():
     ap.add_argument("--cov-dut", default=None)
     ap.add_argument("--base-port", type=int, default=5800)
     ap.add_argument("--only", default=None, help="process only this instance (e.g. instance-01)")
+    ap.add_argument("--require-active-time", action="store_true",
+                    help="fail closed unless post-calibration time zero and full active budget are proven")
     args = ap.parse_args()
 
     if args.workers < 1 or args.snapshots < 1 or args.interval < 0:
@@ -199,7 +251,7 @@ def main():
     print(f"[p2par] cov_dut={cov_dut}\n[p2par] instances={[os.path.basename(d) for d in insts]}", flush=True)
     for inst in insts:
         process_instance(inst, cov_dut, profdata_tool, args.workers, args.base_port,
-                         args.snapshots, args.interval)
+                         args.snapshots, args.interval, args.require_active_time)
     print("[p2par] all instances done", flush=True)
 
 if __name__ == "__main__":
