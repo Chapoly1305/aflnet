@@ -2039,6 +2039,7 @@ region_t* extract_requests_matter(unsigned char* buf, unsigned int buf_size, uns
 }
 
 #include "matter/matter_status_parser.h"
+#include "matter/matter_protected_operation_parser.h"
 
 // Derive the state-feedback sequence from the DUT's (plaintext) responses. Each
 // message contributes an injective encoding of its IM status code (see the note

@@ -18,6 +18,21 @@ It intentionally does not contain Python, the coverage DUT, LLVM tools, replay
 workers, or aggregation code. Bundle validation happens on the build host.
 Coverage is reconstructed later from each retained `replayable-queue`.
 
+The benchmark-wide `reject-list.v1` policy comes from
+`examples/fuzzers/mgptfuzz/resource/reject_list.json` (the same eight entries
+are mirrored by MatterGuard). Protection is deliberately layered:
+
+- Step 3.3 excludes a source scenario when its setup or target contains a
+  protected operation, with source/hash/path evidence in the projection.
+- `afl-fuzz` parses every mutated Invoke/Write path before `run_target()`.
+  A match is neither sent nor scored/saved; policy/category counters appear in
+  `fuzzer_stats`.
+- The fixed-CASE fuzz DUT independently denies the same parsed `RequestPath`
+  with IM `UnsupportedAccess` before cluster dispatch.
+
+Image construction fails if the client parser or DUT fail-safe is absent, or
+if the reject-list hash differs from the sealed corpus evidence.
+
 Build and run locally:
 
 ```bash
@@ -34,10 +49,12 @@ For selected10, prepare its locked bundle and use the selected launcher:
 
 ## Hopper
 
-Hopper has one AFLNet Slurm script: `hopper/run_campaign.sbatch`. It expands
-one prebuilt SIF to job-local storage and starts one `srun` with ten tasks, one
-CPU per task. Each task owns one private Apptainer network/PID namespace and
-one result directory.
+Hopper has one AFLNet Slurm script: `hopper/run_campaign.sbatch`. It copies and
+expands one prebuilt SIF on `$SLURM_TMPDIR`, then starts one `srun` with ten
+tasks, one CPU per task. Each task owns one private Apptainer network/PID
+namespace and writes its live queue, KVS, and snapshots only to node-local
+storage. After `srun` ends, each instance is checksum-verified and published
+once to `/scratch`; the NAS is not in AFLNet's hot path.
 
 ```bash
 sbatch --export=NONE hopper/run_campaign.sbatch \
@@ -110,3 +127,13 @@ One request datagram (see `gen_matter_seeds.py`):
 plaintext with no MIC. Response state 0 is AFLNet's synthetic initial node;
 schema-valid IM statuses 0..255 map to states 1..256, and a response without a
 decodable StatusIB maps to 257. Protocol/opcode are not part of the state.
+
+Protected-operation direct-wire preflight (all eight entries must return
+`UnsupportedAccess`, followed by a successful BasicInformation read in the
+same DUT process):
+
+```bash
+python3 examples/fuzzers/eclipsefuzz/stateful/tests/e2e/test_aflnet_protected_operation_wire.py \
+  --dut out/aflnet-dut-fuzz/chip-all-clusters-app \
+  --artifacts results/harness/aflnet-protected-operation-wire-$(date +%Y%m%d)
+```

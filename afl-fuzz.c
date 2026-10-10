@@ -414,6 +414,12 @@ kliter_t(lms) *M2_prev, *M2_next;
 //Function pointers pointing to Protocol-specific functions
 unsigned int* (*extract_response_codes)(unsigned char* buf, unsigned int buf_size, unsigned int* state_count_ref) = NULL;
 region_t* (*extract_requests)(unsigned char* buf, unsigned int buf_size, unsigned int* region_count_ref) = NULL;
+unsigned int (*protected_operations)(unsigned char* buf, unsigned int buf_size) = NULL;
+u64 matter_protected_testcases = 0;
+u64 matter_protected_acl = 0;
+u64 matter_protected_group_key = 0;
+u64 matter_protected_fabric = 0;
+u64 matter_protected_admin = 0;
 
 /* Initialize the implemented state machine as a graphviz graph */
 void setup_ipsm()
@@ -987,6 +993,34 @@ void update_state_aware_variables(struct queue_entry *q, u8 dry_run)
 }
 
 /* Send (mutated) messages in order to the server under test */
+static unsigned int matter_protected_mask_for_messages(void)
+{
+  unsigned int protected_mask = 0;
+  kliter_t(lms) *scan;
+  if (!protected_operations) return 0;
+  for (scan = kl_begin(kl_messages); scan != kl_end(kl_messages);
+       scan = kl_next(scan)) {
+    if (kl_val(scan)->msize > 0)
+      protected_mask |= protected_operations(
+          (unsigned char *)kl_val(scan)->mdata,
+          (unsigned int)kl_val(scan)->msize);
+  }
+  return protected_mask;
+}
+
+static int reject_matter_protected_testcase(void)
+{
+  unsigned int protected_mask = matter_protected_mask_for_messages();
+  if (!protected_mask) return 0;
+  matter_protected_testcases++;
+  if (protected_mask & MATTER_PROTECTED_ACCESS_CONTROL) matter_protected_acl++;
+  if (protected_mask & MATTER_PROTECTED_GROUP_KEY) matter_protected_group_key++;
+  if (protected_mask & MATTER_PROTECTED_FABRIC) matter_protected_fabric++;
+  if (protected_mask & MATTER_PROTECTED_ADMIN) matter_protected_admin++;
+  messages_sent = 0;
+  return 1;
+}
+
 int send_over_network()
 {
   int n;
@@ -1010,6 +1044,18 @@ int send_over_network()
   if (response_bytes) {
     ck_free(response_bytes);
     response_bytes = NULL;
+  }
+
+  /* reject-list.v1 is evaluated over the complete mutated request sequence
+     before the first datagram is sent. Rejecting the whole testcase keeps
+     region/response annotations aligned and matches mGPTFuzz's "not sent and
+     not scored" policy as closely as AFLNet's execution loop permits. */
+  if (reject_matter_protected_testcase()) {
+    /* This is a fail-safe for execution paths outside common_fuzz_stuff().
+       Normal mutations are rejected before run_target(), so they do not start
+       a DUT child, contribute coverage, or enter save_if_interesting(). */
+    if (child_pid > 0) kill(child_pid, SIGTERM);
+    return 0;
   }
 
   //Create a TCP/UDP socket
@@ -1640,6 +1686,25 @@ static void add_to_queue(u8* fname, u32 len, u8 passed_det) {
 
     if (byte_count != len) PFATAL("AFLNet - Inconsistent file length '%s'", fname);
     q->regions = (*extract_requests)(buf, len, &q->region_count);
+
+    /* Campaign bundles must not contain a protected initial seed. Runtime
+       mutations are normally rejected before run_target(), with a second
+       send_over_network() fail-safe; failing here instead of silently
+       calibrating a no-op exposes a stale/unfiltered corpus. */
+    if (protected_operations) {
+      unsigned int protected_mask = 0;
+      u32 region_index;
+      for (region_index = 0; region_index < q->region_count; ++region_index) {
+        int start = q->regions[region_index].start_byte;
+        int end = q->regions[region_index].end_byte;
+        if (start < 0 || end < start || (u32)end >= len) continue;
+        protected_mask |= protected_operations(
+            buf + (u32)start, (u32)(end - start + 1));
+      }
+      if (protected_mask)
+        FATAL("Initial corpus contains reject-list.v1 operation(s), mask=0x%x: %s",
+              protected_mask, fname);
+    }
     ck_free(buf);
 
     //Keep track the maximal number of seed regions
@@ -4317,6 +4382,12 @@ static void write_stats_file(double bitmap_cvg, double stability, double eps) {
              "fuzzer_pid        : %u\n"
              "cycles_done       : %llu\n"
              "execs_done        : %llu\n"
+             "matter_protected_policy : reject-list.v1\n"
+             "matter_protected_testcases : %llu\n"
+             "matter_protected_acl : %llu\n"
+             "matter_protected_group_key : %llu\n"
+             "matter_protected_fabric : %llu\n"
+             "matter_protected_admin : %llu\n"
              "execs_per_sec     : %0.02f\n"
              "paths_total       : %u\n"
              "paths_favored     : %u\n"
@@ -4345,7 +4416,10 @@ static void write_stats_file(double bitmap_cvg, double stability, double eps) {
              active_fuzz_start_time / 1000,
              active_fuzz_start_time ? (get_cur_time() - active_fuzz_start_time) / 1000 : 0,
              getpid(),
-             queue_cycle ? (queue_cycle - 1) : 0, total_execs, eps,
+             queue_cycle ? (queue_cycle - 1) : 0, total_execs,
+             matter_protected_testcases, matter_protected_acl,
+             matter_protected_group_key, matter_protected_fabric,
+             matter_protected_admin, eps,
              queued_paths, queued_favored, queued_discovered, queued_imported,
              max_depth, current_entry, pending_favored, pending_not_fuzzed,
              queued_variable, stability, bitmap_cvg, unique_crashes,
@@ -5514,6 +5588,13 @@ EXP_ST u8 common_fuzz_stuff(char** argv, u8* out_buf, u32 len) {
   } while(cur_it != M2_next);
 
   /* End of AFLNet code */
+
+  /* mGPTFuzz's reject-list semantics are "not sent and not scored". Reject
+     before run_target() so the mutation cannot start a DUT child, contribute
+     startup coverage, alter state feedback, or enter save_if_interesting().
+     The send_over_network() copy is retained only as a fail-safe for any
+     execution path that bypasses this normal mutation seam. */
+  if (reject_matter_protected_testcase()) return 0;
 
   fault = run_target(argv, exec_tmout);
 
@@ -9082,6 +9163,7 @@ int main(int argc, char** argv) {
              MATTER so the existing UDP baseline stays bit-identical. */
           extract_requests = &extract_requests_matter_tcp;
           extract_response_codes = &extract_response_codes_matter_tcp;
+          protected_operations = &matter_tcp_protected_operations;
         } else if (!strcmp(optarg, "DTLS12")) {
           extract_requests = &extract_requests_dtls12;
           extract_response_codes = &extract_response_codes_dtls12;
@@ -9127,6 +9209,7 @@ int main(int argc, char** argv) {
         } else if (!strcmp(optarg, "MATTER")) {
           extract_requests = &extract_requests_matter;
           extract_response_codes = &extract_response_codes_matter;
+          protected_operations = &matter_protected_operations;
         } else {
           FATAL("%s protocol is not supported yet!", optarg);
         }

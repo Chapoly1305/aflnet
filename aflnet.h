@@ -78,6 +78,16 @@ unsigned int* extract_response_codes_matter(unsigned char* buf, unsigned int buf
 unsigned int* extract_response_codes_matter_tcp(unsigned char* buf, unsigned int buf_size, unsigned int* state_count_ref);
 extern unsigned int* (*extract_response_codes)(unsigned char* buf, unsigned int buf_size, unsigned int* state_count_ref);
 
+/* Exact reject-list.v1 scan of one Matter request region. The return value is
+ * a bitmask of MATTER_PROTECTED_* classes; zero means no schema-valid protected
+ * path was recovered. */
+#define MATTER_PROTECTED_ACCESS_CONTROL  (1u << 0)
+#define MATTER_PROTECTED_GROUP_KEY       (1u << 1)
+#define MATTER_PROTECTED_FABRIC          (1u << 2)
+#define MATTER_PROTECTED_ADMIN           (1u << 3)
+unsigned int matter_protected_operations(unsigned char* buf, unsigned int size);
+unsigned int matter_tcp_protected_operations(unsigned char* buf, unsigned int size);
+
 region_t* extract_requests_smtp(unsigned char* buf, unsigned int buf_size, unsigned int* region_count_ref);
 region_t* extract_requests_ssh(unsigned char* buf, unsigned int buf_size, unsigned int* region_count_ref);
 region_t* extract_requests_tls(unsigned char* buf, unsigned int buf_size, unsigned int* region_count_ref);

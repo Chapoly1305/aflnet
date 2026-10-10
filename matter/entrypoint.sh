@@ -36,6 +36,7 @@ start_epoch="$(date +%s)"
     "${INSTANCE}" "${seed_count}" "${FUZZ_SECONDS}" "${SNAPSHOT_INTERVAL}"
   printf 'transport=udp\ndelay_us=%s\npoll_ms=%s\nstorage_mode=file\n' \
     "${DELAY_US}" "${POLL_MS}"
+  printf 'protected_operation_policy=reject-list.v1\n'
 } > "${OUT}/run.env"
 
 /opt/fuzzer/snapshot.sh "${OUT}" "${SNAPSHOT_INTERVAL}" "${start_epoch}" &
@@ -87,6 +88,12 @@ active_start="$(stat_value active_fuzz_start_time || true)"
 active_seconds="$(stat_value active_fuzz_seconds || true)"
 last_update="$(stat_value last_update || true)"
 execs_done="$(stat_value execs_done || true)"
+protected_policy="$(stat_value matter_protected_policy || true)"
+protected_testcases="$(stat_value matter_protected_testcases || true)"
+protected_acl="$(stat_value matter_protected_acl || true)"
+protected_group_key="$(stat_value matter_protected_group_key || true)"
+protected_fabric="$(stat_value matter_protected_fabric || true)"
+protected_admin="$(stat_value matter_protected_admin || true)"
 wall_start="$(stat_value start_time || true)"
 calibration_seconds=missing
 if [[ "${active_start}" =~ ^[0-9]+$ && "${wall_start}" =~ ^[0-9]+$ ]] && \
@@ -96,6 +103,18 @@ fi
 minimum=$((FUZZ_SECONDS > 10 ? FUZZ_SECONDS - 5 : 1))
 [[ "${active_seconds}" =~ ^[0-9]+$ ]] && (( active_seconds >= minimum )) || status=incomplete-budget
 [[ -s "${KVS}" ]] || status=missing-file-kvs
+[[ "${protected_policy}" == reject-list.v1 ]] || status=missing-protected-policy
+for value in "${protected_testcases}" "${protected_acl}" "${protected_group_key}" \
+             "${protected_fabric}" "${protected_admin}"; do
+  [[ "${value}" =~ ^[0-9]+$ ]] || status=invalid-protected-counters
+done
+if [[ "${protected_testcases}" =~ ^[0-9]+$ ]]; then
+  for value in "${protected_acl}" "${protected_group_key}" \
+               "${protected_fabric}" "${protected_admin}"; do
+    [[ "${value}" =~ ^[0-9]+$ ]] && (( value <= protected_testcases )) || \
+      status=inconsistent-protected-counters
+  done
+fi
 
 {
   printf 'ended=%s\nafl_exit=%s\nstatus=%s\n' "$(date -Iseconds)" "${afl_rc}" "${status}"
@@ -107,6 +126,11 @@ minimum=$((FUZZ_SECONDS > 10 ? FUZZ_SECONDS - 5 : 1))
     "${FUZZ_SECONDS}" "${calibration_seconds}"
   printf 'initial_calibration_status=%s\ninitial_calibration_failures=%s\n' \
     "${calibration_status}" "${calibration_failures}"
+  printf 'observed_protected_operation_policy=%s\nprotected_testcases=%s\n' \
+    "${protected_policy:-missing}" "${protected_testcases:-missing}"
+  printf 'protected_acl=%s\nprotected_group_key=%s\nprotected_fabric=%s\nprotected_admin=%s\n' \
+    "${protected_acl:-missing}" "${protected_group_key:-missing}" \
+    "${protected_fabric:-missing}" "${protected_admin:-missing}"
 } >> "${OUT}/run.env"
 chmod -R a+rX "${OUT}" 2>/dev/null || true
 [[ "${status}" == ok ]] || die "campaign failed: ${status}"

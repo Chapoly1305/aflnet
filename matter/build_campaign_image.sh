@@ -15,6 +15,7 @@ DICT="${REPO_ROOT}/corpus/derived-afl.dict"
 MANIFEST="${REPO_ROOT}/corpus/derived-afl.manifest.json"
 PROJECTION="${REPO_ROOT}/corpus/derived-afl.projection.json"
 FIDELITY="${REPO_ROOT}/corpus/derived-afl.fidelity.json"
+REJECT_LIST="${REPO_ROOT}/examples/fuzzers/mgptfuzz/resource/reject_list.json"
 NO_CACHE=0
 ARCHIVE_IMAGE=1
 BATCH_ID="${ECLIPSEFUZZ_BATCH_ID:-batch4}"
@@ -62,12 +63,12 @@ done
 command -v docker >/dev/null || { echo "ERROR: docker required" >&2; exit 1; }
 [[ -x "${FUZZ_DUT}" ]] || { echo "ERROR: fuzz DUT missing: ${FUZZ_DUT}" >&2; exit 1; }
 [[ -x "${AFLNET_DIR}/afl-fuzz" ]] || { echo "ERROR: afl-fuzz missing" >&2; exit 1; }
-for path in "${DICT}" "${MANIFEST}" "${PROJECTION}" "${FIDELITY}"; do
+for path in "${DICT}" "${MANIFEST}" "${PROJECTION}" "${FIDELITY}" "${REJECT_LIST}"; do
   [[ -f "${path}" ]] || { echo "ERROR: input artifact missing: ${path}" >&2; exit 1; }
 done
 python3 "${REPO_ROOT}/examples/fuzzers/eclipsefuzz/stateful/tools/aflnet_input_bundle.py" verify \
   --seeds "${SEED_DIR}" --dictionary "${DICT}" --projection "${PROJECTION}" \
-  --fidelity "${FIDELITY}" --manifest "${MANIFEST}"
+  --fidelity "${FIDELITY}" --manifest "${MANIFEST}" --reject-list "${REJECT_LIST}"
 
 seed_count="$(find "${SEED_DIR}" -maxdepth 1 -type f -name '*.raw' -printf '.\n' | wc -l)"
 if [[ -z "${CORPUS_VARIANT}" ]]; then
@@ -86,6 +87,14 @@ for symbol in __afl_area_ptr __afl_manual_init __sanitizer_cov_trace_pc_guard; d
     exit 1
   }
 done
+grep -qw -- matter_protected_operations <<<"$(nm "${AFLNET_DIR}/afl-fuzz" 2>/dev/null || true)" || {
+  echo "ERROR: afl-fuzz lacks the Matter reject-list runtime gate" >&2
+  exit 1
+}
+grep -qw -- MatterFuzzOverrideAccessControlCheck <<<"${fuzz_symbols}" || {
+  echo "ERROR: fuzz DUT lacks the protected-operation fail-safe" >&2
+  exit 1
+}
 for symbol in __llvm_profile_counter_bias __llvm_profile_write_file; do
   if grep -qw -- "${symbol}" <<<"${fuzz_symbols}"; then
     echo "ERROR: fuzz DUT contains coverage instrumentation: ${symbol}" >&2
@@ -126,6 +135,8 @@ build_args=(
   --label "aflnet.dict_sha256=$(sha "${DICT}")"
   --label "aflnet.afl_fuzz_sha256=$(sha "${AFLNET_DIR}/afl-fuzz")"
   --label "aflnet.fuzz_dut_sha256=$(sha "${FUZZ_DUT}")"
+  --label "aflnet.protected_operation_policy=reject-list.v1"
+  --label "aflnet.protected_operation_policy_sha256=$(sha "${REJECT_LIST}")"
   --label "aflnet.entrypoint_sha256=$(sha "${SCRIPT_DIR}/entrypoint.sh")"
   --label "aflnet.snapshot_sha256=$(sha "${SCRIPT_DIR}/snapshot.sh")"
   --label "aflnet.storage_mode=file"
