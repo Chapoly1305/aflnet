@@ -106,4 +106,9 @@ fi
 
 command -v docker >/dev/null || { echo "ERROR: docker required" >&2; exit 1; }
 docker image inspect "${IMAGE}" >/dev/null
+if ! docker run --rm --network none --entrypoint sh "${IMAGE}" \
+    -ec 'command -v zstd >/dev/null'; then
+  echo "ERROR: coverage replay image lacks zstd; rebuild the campaign image before replay" >&2
+  exit 1
+fi
 "${command[@]}"

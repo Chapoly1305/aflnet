@@ -7,9 +7,15 @@ import unittest
 
 
 SCRIPT = Path(__file__).with_name("run_coverage_replay_docker.sh")
+DOCKERFILE = Path(__file__).with_name("Dockerfile.campaign")
 
 
 class CoverageReplayDockerLauncherTest(unittest.TestCase):
+    def test_campaign_image_contains_archive_dependency(self):
+        dockerfile = DOCKERFILE.read_text()
+        self.assertRegex(dockerfile, r"(?m)^\s+zstd &&")
+        self.assertIn("command -v zstd", SCRIPT.read_text())
+
     def fixture(self, root):
         analysis = root / "coverage-analysis"
         protected = root / "protected-runs"

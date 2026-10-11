@@ -1,11 +1,14 @@
 FROM ubuntu:24.04
 
-# Fuzz-only runtime. Coverage replay and aggregation run after the campaign on
-# the host and are deliberately not part of this image.
+# Campaign runtime.  The same immutable image is also used as the execution
+# shell for saved-queue coverage replay, whose final archive step requires
+# zstd.  Keep that small runtime dependency here so a replay cannot finish all
+# seeds and then fail only while sealing its cache.
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       libglib2.0-0 libmount1 libblkid1 libselinux1 libffi8 libpcre2-8-0 \
-      libstdc++6 libgcc-s1 zlib1g libcgraph6 libcdt5 libcap2 coreutils procps && \
+      libstdc++6 libgcc-s1 zlib1g libcgraph6 libcdt5 libcap2 coreutils procps \
+      zstd && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 COPY afl-fuzz /opt/aflnet/afl-fuzz
