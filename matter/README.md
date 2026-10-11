@@ -18,6 +18,31 @@ It intentionally does not contain Python, the coverage DUT, LLVM tools, replay
 workers, or aggregation code. Bundle validation happens on the build host.
 Coverage is reconstructed later from each retained `replayable-queue`.
 
+Coverage replay containers must be launched with
+`run_coverage_replay_docker.sh`. The launcher gives every shard its own Docker
+bridge network namespace and intentionally provides no host-network option.
+The replay worker and coverage DUT communicate over loopback inside the
+container, so no host port publication is required. Do not replace this with
+`--network host`: many fresh Matter DUT processes enumerate interfaces through
+netlink during startup, and sharing one host namespace turns that work into a
+serialized kernel bottleneck that can prevent LLVM profiles from flushing.
+
+The batch-specific replay driver remains in its coverage-analysis directory;
+pass its ordinary arguments after `--`:
+
+```bash
+examples/fuzzers/aflnet/matter/run_coverage_replay_docker.sh \
+  --image matter-ep2-fuzzer:coverage \
+  --name aflnet-coverage-full-01 \
+  --analysis-dir /data/coverage-analysis \
+  --protected-runs-dir /data/protected-runs \
+  --cpuset 0-15 --startup-settle-seconds 10 -- \
+  --stage run --skip-prepare --no-finalize --workers 16 \
+  --export-jobs 4 --base-port 42000 \
+  --replay-scripts-dir /data/coverage-analysis/source-coverage/provenance/replay \
+  --only full/instance-01
+```
+
 The benchmark-wide `reject-list.v1` policy comes from
 `examples/fuzzers/mgptfuzz/resource/reject_list.json` (the same eight entries
 are mirrored by MatterGuard). Protection is deliberately layered:

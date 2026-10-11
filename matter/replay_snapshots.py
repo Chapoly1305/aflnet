@@ -33,8 +33,14 @@ def snapshot_plan(elapsed, duration, interval, n_snapshots):
     return plan
 
 
-def publish_snapshots(instance, raw_records, plan, tool, context):
-    """Build every cumulative snapshot from retained raw inputs and publish atomically."""
+def publish_snapshots(instance, raw_records, plan, tool, context, incremental=False):
+    """Publish cumulative snapshots with an exact retained-raw input ledger.
+
+    Incremental mode is ONLY for these disjoint fresh-process queue replays:
+    add each new raw once to the previous cumulative indexed profile. It is
+    not valid for repeated cumulative dumps from a continuously running DUT.
+    The complete raw ledger is retained for independent from-scratch rebuilds.
+    """
     instance = Path(instance)
     planned = [index for _elapsed, indices in plan for index in indices]
     if sorted(planned) != list(range(len(raw_records))) or len(set(planned)) != len(planned):
@@ -44,19 +50,23 @@ def publish_snapshots(instance, raw_records, plan, tool, context):
     raw_inputs = stage / "raw-inputs"
     snapshots.mkdir()
     raw_inputs.mkdir()
-    seen_indices, rows = [], []
+    seen_indices, rows, previous_snapshot = [], [], None
     try:
         for elapsed, indices in plan:
             seen_indices.extend(indices)
             if not seen_indices:
                 continue
             output = snapshots / f"snapshot-{elapsed}s.profdata"
-            inputs = [raw_records[i]["path"] for i in seen_indices]
+            merge_indices = indices if incremental else seen_indices
+            inputs = [raw_records[i]["path"] for i in merge_indices]
+            if incremental and previous_snapshot is not None:
+                inputs.insert(0, str(previous_snapshot))
             r = subprocess.run([tool, "merge", *inputs, "-o", str(output)],
                                capture_output=True, text=True)
             (stage / f"merge-{elapsed}.log").write_text(r.stdout + r.stderr)
             if r.returncode or not output.is_file() or not output.stat().st_size:
                 raise RuntimeError(f"cumulative merge failed at {elapsed}s: {r.stderr.strip()}")
+            previous_snapshot = output
             manifest = raw_inputs / f"snapshot-{elapsed}s.tsv"
             with manifest.open("w", newline="") as stream:
                 writer = csv.writer(stream, delimiter="\t")

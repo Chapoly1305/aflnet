@@ -116,7 +116,8 @@ def active_clock_for(inst_dir, afl_out):
 
 
 def process_instance(inst_dir, cov_dut, profdata_tool, workers, base_port, n_snapshots,
-                     interval=1800, require_active_time=False):
+                     interval=1800, require_active_time=False, incremental_merge=False,
+                     include_initial_snapshot=False):
     afl_out = os.path.join(inst_dir, "afl-out")
     queue = os.path.join(afl_out, "replayable-queue")
     if not os.path.isdir(queue):
@@ -190,8 +191,19 @@ def process_instance(inst_dir, cov_dut, profdata_tool, workers, base_port, n_sna
         elapsed = [max(0, int(os.path.getmtime(s)) - start) for s in seeds]
         duration = duration_for(afl_out, start, seeds)
     plan = snapshot_plan(elapsed, duration, interval, n_snapshots)
+    if include_initial_snapshot:
+        initial = [i for i, seconds in enumerate(elapsed) if seconds == 0]
+        if not initial:
+            raise RuntimeError(f"{name}: no initial inputs at active time zero")
+        plan = [(0, initial)] + [(seconds, [i for i in indices if elapsed[i] > 0])
+                                 for seconds, indices in plan]
     raw_records = [cached_raw_record(task, context) for task in all_tasks]
-    n_snap = publish_snapshots(inst_dir, raw_records, plan, profdata_tool, context)
+    snapshot_context = dict(context,
+                            snapshot_merge_strategy=("disjoint-fresh-process-batches" if incremental_merge
+                                                     else "all-retained-raw-from-scratch"),
+                            initial_snapshot=include_initial_snapshot)
+    n_snap = publish_snapshots(inst_dir, raw_records, plan, profdata_tool, snapshot_context,
+                              incremental=incremental_merge)
     print(f"[p2par] {name}: {n_snap} snapshots written -> {snap_dir}", flush=True)
 
 def main():
@@ -208,10 +220,16 @@ def main():
     ap.add_argument("--only", default=None, help="process only this instance (e.g. instance-01)")
     ap.add_argument("--require-active-time", action="store_true",
                     help="fail closed unless post-calibration time zero and full active budget are proven")
+    ap.add_argument("--incremental-merge", action="store_true",
+                    help="merge disjoint fresh-process replay batches once; retain complete raw ledgers")
+    ap.add_argument("--include-initial-snapshot", action="store_true",
+                    help="retain measured initial-corpus coverage at active t=0")
     args = ap.parse_args()
 
     if args.workers < 1 or args.snapshots < 1 or args.interval < 0:
         ap.error("workers/snapshots must be positive; interval must be nonnegative")
+    if args.include_initial_snapshot and (not args.require_active_time or args.interval == 0):
+        ap.error("initial snapshot requires --require-active-time and fixed intervals")
     if not 1 <= args.base_port <= 65535 - args.workers + 1:
         ap.error("worker ports are outside UDP port range")
 
@@ -251,7 +269,8 @@ def main():
     print(f"[p2par] cov_dut={cov_dut}\n[p2par] instances={[os.path.basename(d) for d in insts]}", flush=True)
     for inst in insts:
         process_instance(inst, cov_dut, profdata_tool, args.workers, args.base_port,
-                         args.snapshots, args.interval, args.require_active_time)
+                         args.snapshots, args.interval, args.require_active_time,
+                         args.incremental_merge, args.include_initial_snapshot)
     print("[p2par] all instances done", flush=True)
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 """Isolated UDP queue replay; infrastructure failures never become coverage."""
+import errno
 import hashlib
 import json
 import os
@@ -14,6 +15,11 @@ _PORT = _COV_DUT = _PROFDATA_TOOL = _CONTEXT = None
 _POLL_MS = 100
 _STORAGE_MODE = "file"
 _DRAIN_IDLE_SECONDS = 0.001
+_STARTUP_TIMEOUT_SECONDS = 30.0
+_STARTUP_SETTLE_SECONDS = float(os.environ.get(
+    "AFLNET_REPLAY_STARTUP_SETTLE_SECONDS", "0.25"))
+if not 0 <= _STARTUP_SETTLE_SECONDS <= 60:
+    raise ValueError("AFLNET_REPLAY_STARTUP_SETTLE_SECONDS must be between 0 and 60")
 
 
 def sha(path):
@@ -29,7 +35,7 @@ def replay_context(cov_dut, tool, poll_ms=100, storage_mode="file"):
         raise ValueError(f"AFLNet requires file storage; got {storage_mode}")
     delegate = "linux-file-backed"
     platform_config = "memory-default"
-    return {"schema": "aflnet-queue-replay.v6", "coverage_kind": "saved_queue_replay",
+    return {"schema": "aflnet-queue-replay.v8", "coverage_kind": "saved_queue_replay",
             "cov_dut_sha256": sha(cov_dut), "profdata_tool_sha256": sha(tool),
             "worker_sha256": sha(__file__), "storage_mode": storage_mode,
             "storage_delegate": delegate,
@@ -37,18 +43,84 @@ def replay_context(cov_dut, tool, poll_ms=100, storage_mode="file"):
             "testcase_state_reset": "fresh-process",
             "raw_profile_retention": "content_addressed",
             "snapshot_merge_inputs": "profraw",
-            "transport": "udp", "startup_seconds": 1.5,
+            "transport": "udp", "oversized_udp": "attempt-send-stop-on-EMSGSIZE-preserve-prefix",
+            "startup_readiness": "process-owned-udp-socket-bound",
+            "startup_timeout_seconds": _STARTUP_TIMEOUT_SECONDS,
+            "startup_settle_seconds": _STARTUP_SETTLE_SECONDS,
             "first_response_timeout_ms": poll_ms,
             "drain_idle_timeout_ms": int(_DRAIN_IDLE_SECONDS * 1000)}
 
 
+def _process_socket_inodes(pid, proc_root=Path("/proc")):
+    """Return socket inodes currently owned by one process.
+
+    Reading the process fd table prevents a different replay worker that uses
+    the same network namespace from satisfying this worker's readiness gate.
+    """
+    inodes = set()
+    try:
+        descriptors = (proc_root / str(pid) / "fd").iterdir()
+        for descriptor in descriptors:
+            try:
+                target = os.readlink(descriptor)
+            except OSError:
+                continue
+            if target.startswith("socket:[") and target.endswith("]"):
+                inodes.add(target[8:-1])
+    except OSError:
+        pass
+    return inodes
+
+
+def _bound_udp_inodes(port, proc_root=Path("/proc")):
+    """Return UDP/UDP6 socket inodes bound to ``port`` in this netns."""
+    matches = set()
+    for name in ("udp", "udp6"):
+        try:
+            lines = (proc_root / "net" / name).read_text().splitlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            fields = line.split()
+            if len(fields) <= 9:
+                continue
+            try:
+                local_port = int(fields[1].rsplit(":", 1)[1], 16)
+            except (IndexError, ValueError):
+                continue
+            if local_port == port:
+                matches.add(fields[9])
+    return matches
+
+
+def wait_for_udp_ready(process, port, timeout_seconds=_STARTUP_TIMEOUT_SECONDS,
+                       settle_seconds=_STARTUP_SETTLE_SECONDS, proc_root=Path("/proc")):
+    """Wait until this exact DUT process owns the requested bound UDP socket."""
+    started = time.monotonic()
+    deadline = started + timeout_seconds
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"DUT exited before UDP readiness: {process.returncode}")
+        owned = _process_socket_inodes(process.pid, proc_root)
+        if owned and owned & _bound_udp_inodes(port, proc_root):
+            if settle_seconds:
+                time.sleep(settle_seconds)
+            return time.monotonic() - started
+        time.sleep(0.01)
+    raise RuntimeError(f"DUT did not bind UDP port {port} within {timeout_seconds:g}s")
+
+
 def split_aflnet(data):
-    """Strict AFLNet queue framing, allowing arbitrary mutated message bytes."""
+    """Validate file framing, independently of whether messages fit in UDP.
+
+    Historical AFLNet saves the attempted message even when send() fails.
+    Keep it so send_requests can reproduce that failure after the valid prefix.
+    """
     out, offset = [], 0
     while offset + 4 <= len(data):
         size = int.from_bytes(data[offset:offset + 4], "little")
         offset += 4
-        if not 0 < size <= 65507 or offset + size > len(data):
+        if size <= 0 or offset + size > len(data):
             return []
         out.append(data[offset:offset + size])
         offset += size
@@ -141,9 +213,19 @@ def send_requests(messages, process):
         for msg in messages:
             if process.poll() is not None:
                 raise RuntimeError(f"DUT exited before send: {process.returncode}")
-            if sock.send(msg) != len(msg):
+            row = {"request": response_meta(msg), "responses": [], "sent": False}
+            try:
+                sent = sock.send(msg)
+            except OSError as error:
+                if error.errno != errno.EMSGSIZE or len(msg) <= 65507:
+                    raise
+                row.update(transport_error={"errno": error.errno, "name": "EMSGSIZE"},
+                           timeout=True)
+                requests.append(row)
+                break  # AFLNet jumps to HANDLE_RESPONSES; it never sends the tail.
+            if sent != len(msg):
                 raise RuntimeError("short UDP send")
-            row = {"request": response_meta(msg), "responses": []}
+            row["sent"] = True
             for reply in recv_burst(sock, _POLL_MS / 1000.0):
                 row["responses"].append(response_meta(reply))
             # No response is a legitimate result for an invalid fuzzed message.
@@ -196,8 +278,14 @@ def _replay(task):
                                         "--KVS", str(work / "k")],
                                        stdout=log, stderr=subprocess.STDOUT, env=env)
             record["spawned"] = True
-            time.sleep(1.5)
+            record["startup_wait_seconds"] = wait_for_udp_ready(process, _PORT)
             record["requests"] = send_requests(messages, process)
+            record["queued_messages"] = len(messages)
+            record["sent_messages"] = sum(row["sent"] for row in record["requests"])
+            record["transport_errors"] = [
+                {"message_index": i, **row["transport_error"]}
+                for i, row in enumerate(record["requests"]) if "transport_error" in row
+            ]
             record["dut_exit"] = stop_dut(process)
         raw = work / "p.profraw"
         if not raw.is_file() or not raw.stat().st_size:
