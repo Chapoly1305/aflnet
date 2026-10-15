@@ -1,8 +1,8 @@
 /*
  * Standalone unit test for the AFLNet Matter parser (extract_requests_matter /
- * extract_response_codes_matter in aflnet.c). Builds on any platform (no libcap
- * / graphviz needed) so the parser logic can be validated without a full AFLNet
- * build.
+ * extract_response_codes_matter in aflnet.c). Builds without external graph or
+ * capability development libraries so the parser logic can be validated
+ * independently of the full AFLNet executable.
  *
  * Build (from examples/fuzzers/aflnet/):
  *   cc -c -w -I. aflnet.c -o /tmp/aflnet.o

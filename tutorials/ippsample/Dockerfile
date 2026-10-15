@@ -28,7 +28,6 @@ RUN apt-get -y update && \
     curl \
     openssl \
     clang \
-    graphviz-dev \
     git \
     libgnutls28-dev \
     python-pip \

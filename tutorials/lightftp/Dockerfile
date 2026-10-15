@@ -7,7 +7,6 @@ RUN apt-get -y update && \
     build-essential \
     openssl \
     clang \
-    graphviz-dev \
     git \
     libgnutls-dev
 

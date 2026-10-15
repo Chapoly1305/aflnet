@@ -27,13 +27,11 @@ year={2020},}
 ```bash
 # Install clang (as required by AFL/AFLNet to enable llvm_mode)
 sudo apt-get install clang
-# Install graphviz development
-sudo apt-get install graphviz-dev libcap-dev
 ```
 
 ## AFLNet
 
-Download AFLNet and compile it. We have tested AFLNet on Ubuntu 18.04 and Ubuntu 16.04 64-bit and it would also work on all environments that support the vanilla AFL and [graphviz](https://graphviz.org).
+Download AFLNet and compile it. We have tested AFLNet on Ubuntu 18.04 and Ubuntu 16.04 64-bit. AFLNet writes its inferred state machine directly in Graphviz DOT format, so Graphviz is optional and only needed if you want to render that file.
 
 ```bash
 # First, clone this AFLNet repository to a folder named aflnet

@@ -1,8 +1,8 @@
 # Builds AFLNet (with the Matter -P MATTER parser) on Linux.
 #
-# AFLNet hard-depends on graphviz + libcap + Linux fork semantics, so it cannot
-# build on macOS. This image validates that the Matter parser additions compile
-# on Linux and that afl-fuzz accepts `-P MATTER`.
+# AFLNet depends on Linux fork, network-namespace, and capability semantics.
+# This image validates that the Matter parser additions compile on Linux and
+# that afl-fuzz accepts `-P MATTER`.
 #
 # Build context must be the aflnet/ repo root (parent of this matter/ dir):
 #   docker build -f matter/Dockerfile.aflnet -t aflnet-matter .
@@ -15,7 +15,6 @@ FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential clang llvm llvm-dev \
-        graphviz-dev libcap-dev \
         libcurl4-openssl-dev libjson-c-dev \
         ca-certificates make \
     && rm -rf /var/lib/apt/lists/*

@@ -67,11 +67,14 @@
 #include <sys/mman.h>
 #include <sys/ioctl.h>
 #include <sys/file.h>
-#include <sys/capability.h>
+#include <sys/syscall.h>
+
+#include <linux/capability.h>
 
 #include "aflnet.h"
-#include <graphviz/gvc.h>
 #include <math.h>
+
+KHASH_SET_INIT_INT64(hs64)
 
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined (__OpenBSD__)
 #  include <sys/sysctl.h>
@@ -396,9 +399,26 @@ u8 region_level_mutation = 0;
 u8 state_selection_algo = ROUND_ROBIN, seed_selection_algo = RANDOM_SELECTION;
 u8 false_negative_reduction = 0;
 
-/* Implemented state machine */
-Agraph_t  *ipsm;
-static FILE* ipsm_dot_file;
+/* Implemented state machine. Keep the graph locally and emit Graphviz DOT
+   directly; using libcgraph merely as an edge set made Graphviz a build-time
+   and runtime dependency. */
+typedef struct {
+  u32 id;
+  u8 discovered_during_dry_run;
+} ipsm_node_t;
+
+typedef struct {
+  u32 from;
+  u32 to;
+  u8 discovered_during_dry_run;
+} ipsm_edge_t;
+
+static ipsm_node_t *ipsm_nodes;
+static u32 ipsm_node_count;
+static ipsm_edge_t *ipsm_edges;
+static u32 ipsm_edge_count;
+static khash_t(hs32) *khs_ipsm_nodes;
+static khash_t(hs64) *khs_ipsm_edges;
 
 /* Hash table/map and list */
 klist_t(lms) *kl_messages;
@@ -421,31 +441,98 @@ u64 matter_protected_group_key = 0;
 u64 matter_protected_fabric = 0;
 u64 matter_protected_admin = 0;
 
-/* Initialize the implemented state machine as a graphviz graph */
+/* Initialize the implemented state machine. */
 void setup_ipsm()
 {
-  ipsm = agopen("g", Agdirected, 0);
-
-  agattr(ipsm, AGNODE, "color", "black"); //Default node colr is black
-  agattr(ipsm, AGEDGE, "color", "black"); //Default edge color is black
-
+  khs_ipsm_nodes = kh_init(hs32);
+  khs_ipsm_edges = kh_init(hs64);
   khs_ipsm_paths = kh_init(hs32);
-
   khms_states = kh_init(hms);
 }
 
 /* Free memory allocated to state-machine variables */
 void destroy_ipsm()
 {
-  agclose(ipsm);
-
+  kh_destroy(hs32, khs_ipsm_nodes);
+  kh_destroy(hs64, khs_ipsm_edges);
   kh_destroy(hs32, khs_ipsm_paths);
 
   state_info_t *state;
   kh_foreach_value(khms_states, state, {ck_free(state->seeds); ck_free(state);});
   kh_destroy(hms, khms_states);
 
+  ck_free(ipsm_nodes);
+  ck_free(ipsm_edges);
   ck_free(state_ids);
+}
+
+/* Add a node or edge to the implemented state machine, preserving the color
+   assigned on first discovery just as libcgraph did. */
+static u8 add_ipsm_node(u32 state_id, u8 dry_run)
+{
+  int discard;
+
+  if (kh_get(hs32, khs_ipsm_nodes, state_id) != kh_end(khs_ipsm_nodes))
+    return 0;
+
+  kh_put(hs32, khs_ipsm_nodes, state_id, &discard);
+  ipsm_nodes = (ipsm_node_t *) ck_realloc(
+      ipsm_nodes, (ipsm_node_count + 1) * sizeof(ipsm_node_t));
+  ipsm_nodes[ipsm_node_count].id = state_id;
+  ipsm_nodes[ipsm_node_count].discovered_during_dry_run = dry_run;
+  ipsm_node_count++;
+  return 1;
+}
+
+static void add_ipsm_edge(u32 from, u32 to, u8 dry_run)
+{
+  int discard;
+  khint64_t edge_key = ((khint64_t) from << 32) | to;
+
+  if (kh_get(hs64, khs_ipsm_edges, edge_key) != kh_end(khs_ipsm_edges))
+    return;
+
+  kh_put(hs64, khs_ipsm_edges, edge_key, &discard);
+  ipsm_edges = (ipsm_edge_t *) ck_realloc(
+      ipsm_edges, (ipsm_edge_count + 1) * sizeof(ipsm_edge_t));
+  ipsm_edges[ipsm_edge_count].from = from;
+  ipsm_edges[ipsm_edge_count].to = to;
+  ipsm_edges[ipsm_edge_count].discovered_during_dry_run = dry_run;
+  ipsm_edge_count++;
+}
+
+/* Write the same user-facing state graph without requiring libgvc/libcgraph.
+   Nodes and edges are emitted in discovery order to keep the file stable. */
+static void write_ipsm_dot()
+{
+  u32 i;
+  s32 fd;
+  FILE *dot_file;
+  u8 *path = alloc_printf("%s/ipsm.dot", out_dir);
+
+  fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+  if (fd < 0) PFATAL("Unable to create %s", path);
+
+  dot_file = fdopen(fd, "w");
+  if (!dot_file) {
+    close(fd);
+    PFATAL("Unable to open %s for writing", path);
+  }
+
+  fprintf(dot_file, "digraph g {\n\tnode [color=black];\n\tedge [color=black];\n");
+  for (i = 0; i < ipsm_node_count; i++) {
+    fprintf(dot_file, "\t%u [color=%s];\n", ipsm_nodes[i].id,
+            ipsm_nodes[i].discovered_during_dry_run ? "blue" : "red");
+  }
+  for (i = 0; i < ipsm_edge_count; i++) {
+    fprintf(dot_file, "\t%u -> %u [color=%s];\n", ipsm_edges[i].from,
+            ipsm_edges[i].to,
+            ipsm_edges[i].discovered_during_dry_run ? "blue" : "red");
+  }
+  fprintf(dot_file, "}\n");
+
+  if (fclose(dot_file)) PFATAL("Unable to finish writing %s", path);
+  ck_free(path);
 }
 
 /* Get state index in the state IDs list, given a state ID */
@@ -474,6 +561,35 @@ void expand_was_fuzzed_map(u32 new_states, u32 new_qentries) {
   //Update total number of states (rows) and total number of queue entries (columns) in the was_fuzzed_map
   fuzzed_map_states += new_states;
   fuzzed_map_qentries += new_qentries;
+}
+
+/* Add a graph node and its corresponding state-selection metadata. */
+static void add_ipsm_state(u32 state_id, u8 dry_run)
+{
+  int discard;
+  khint_t k;
+  state_info_t *new_state;
+
+  if (!add_ipsm_node(state_id, dry_run)) return;
+
+  /* A state observed during region annotation may already be selectable even
+     though it has not appeared in the graph. Do not replace that metadata. */
+  k = kh_get(hms, khms_states, state_id);
+  if (k != kh_end(khms_states)) return;
+
+  new_state = (state_info_t *) ck_alloc(sizeof(state_info_t));
+  new_state->id = state_id;
+  new_state->is_covered = 1;
+  new_state->score = 1;
+
+  k = kh_put(hms, khms_states, state_id, &discard);
+  kh_value(khms_states, k) = new_state;
+
+  state_ids = (u32 *) ck_realloc(
+      state_ids, (state_ids_count + 1) * sizeof(u32));
+  state_ids[state_ids_count++] = state_id;
+
+  if (state_id != 0) expand_was_fuzzed_map(1, 0);
 }
 
 /* Get unique state count, given a state sequence */
@@ -794,101 +910,17 @@ void update_state_aware_variables(struct queue_entry *q, u8 dry_run)
 
       for(i=1; i < state_count; i++) {
         unsigned int curStateID = state_sequence[i];
-        char fromState[STATE_STR_LEN], toState[STATE_STR_LEN];
-        snprintf(fromState, STATE_STR_LEN, "%d", prevStateID);
-        snprintf(toState, STATE_STR_LEN, "%d", curStateID);
-
-        //Check if the prevStateID and curStateID have been added to the state machine as vertices
-        //Check also if the edge prevStateID->curStateID has been added
-        Agnode_t *from, *to;
-		    Agedge_t *edge;
-		    from = agnode(ipsm, fromState, FALSE);
-		    if (!from) {
-          //Add a node to the graph
-          from = agnode(ipsm, fromState, TRUE);
-          if (dry_run) agset(from,"color","blue");
-          else agset(from,"color","red");
-
-          //Insert this newly discovered state into the states hashtable
-          state_info_t *newState_From = (state_info_t *) ck_alloc (sizeof(state_info_t));
-          newState_From->id = prevStateID;
-          newState_From->is_covered = 1;
-          newState_From->paths = 0;
-          newState_From->paths_discovered = 0;
-          newState_From->selected_times = 0;
-          newState_From->fuzzs = 0;
-          newState_From->score = 1;
-          newState_From->selected_seed_index = 0;
-          newState_From->seeds = NULL;
-          newState_From->seeds_count = 0;
-
-          k = kh_put(hms, khms_states, prevStateID, &discard);
-          kh_value(khms_states, k) = newState_From;
-
-          //Insert this into the state_ids array too
-          state_ids = (u32 *) ck_realloc(state_ids, (state_ids_count + 1) * sizeof(u32));
-          state_ids[state_ids_count++] = prevStateID;
-
-          if (prevStateID != 0) expand_was_fuzzed_map(1, 0);
-        }
-
-		    to = agnode(ipsm, toState, FALSE);
-		    if (!to) {
-          //Add a node to the graph
-          to = agnode(ipsm, toState, TRUE);
-          if (dry_run) agset(to,"color","blue");
-          else agset(to,"color","red");
-
-          //Insert this newly discovered state into the states hashtable
-          state_info_t *newState_To = (state_info_t *) ck_alloc (sizeof(state_info_t));
-          newState_To->id = curStateID;
-          newState_To->is_covered = 1;
-          newState_To->paths = 0;
-          newState_To->paths_discovered = 0;
-          newState_To->selected_times = 0;
-          newState_To->fuzzs = 0;
-          newState_To->score = 1;
-          newState_To->selected_seed_index = 0;
-          newState_To->seeds = NULL;
-          newState_To->seeds_count = 0;
-
-          k = kh_put(hms, khms_states, curStateID, &discard);
-          kh_value(khms_states, k) = newState_To;
-
-          //Insert this into the state_ids array too
-          state_ids = (u32 *) ck_realloc(state_ids, (state_ids_count + 1) * sizeof(u32));
-          state_ids[state_ids_count++] = curStateID;
-
-          if (curStateID != 0) expand_was_fuzzed_map(1, 0);
-        }
-
-        //Check if an edge from->to exists
-		    edge = agedge(ipsm, from, to, NULL, FALSE);
-		    if (!edge) {
-          //Add an edge to the graph
-			    edge = agedge(ipsm, from, to, "new_edge", TRUE);
-          if (dry_run) agset(edge, "color", "blue");
-          else agset(edge, "color", "red");
-		    }
+        add_ipsm_state(prevStateID, dry_run);
+        add_ipsm_state(curStateID, dry_run);
+        add_ipsm_edge(prevStateID, curStateID, dry_run);
 
         //Update prevStateID
         prevStateID = curStateID;
       }
     }
 
-    //Update the dot file
-    s32 fd;
-    u8* tmp;
-    tmp = alloc_printf("%s/ipsm.dot", out_dir);
-    fd = open(tmp, O_WRONLY | O_CREAT, 0600);
-    if (fd < 0) {
-      PFATAL("Unable to create %s", tmp);
-    } else {
-      ipsm_dot_file = fdopen(fd, "w");
-      agwrite(ipsm, ipsm_dot_file);
-      close(fileno(ipsm_dot_file));
-      ck_free(tmp);
-    }
+    //Update the Graphviz-compatible dot file.
+    write_ipsm_dot();
   }
 
   //Update others no matter the new seed leads to interesting state sequence or not
@@ -8878,49 +8910,24 @@ static void save_cmdline(u32 argc, char** argv) {
 
 }
 
-/* Check that afl-fuzz (file/process) has some effective and permitted capability */
+/* Check the running process directly through Linux's capget syscall. File
+   capabilities, when effective, are already reflected in this process. */
+static int has_effective_permitted_capability(u32 capability) {
+  struct __user_cap_header_struct header;
+  struct __user_cap_data_struct data[_LINUX_CAPABILITY_U32S_3];
+  u32 word = capability / 32;
+  u32 mask = 1U << (capability % 32);
 
-static int check_ep_capability(cap_value_t cap, const char *filename) {
-  cap_t file_cap, proc_cap;
-  cap_flag_value_t cap_flag_value;
-  int no_capability = 1;
-  int pid = getpid();
+  memset(&header, 0, sizeof(header));
+  memset(data, 0, sizeof(data));
+  header.version = _LINUX_CAPABILITY_VERSION_3;
+  header.pid = 0;
 
-  file_cap = cap_get_file(filename);
-  proc_cap = cap_get_proc();
+  if (syscall(SYS_capget, &header, data) == -1)
+    PFATAL("Could not read capabilities for process id %d", getpid());
 
-  if (!file_cap && !proc_cap)
-    return no_capability;
-
-  if (file_cap) {
-    if (cap_get_flag(file_cap, cap, CAP_EFFECTIVE, &cap_flag_value))
-      PFATAL("Could not get CAP_EFFECTIVE flag value from file \"%s\"", filename);
-
-    if (cap_flag_value != CAP_SET)
-      return no_capability;
-
-    if (cap_get_flag(file_cap, cap, CAP_PERMITTED, &cap_flag_value))
-      PFATAL("Could not get CAP_PERMITTED flag value from file \"%s\"", filename);
-
-    if (cap_flag_value != CAP_SET)
-      return no_capability;
-  }
-
-  if (proc_cap) {
-    if (cap_get_flag(proc_cap, cap, CAP_EFFECTIVE, &cap_flag_value))
-      PFATAL("Could not get CAP_EFFECTIVE flag value from process id %d", pid);
-
-    if (cap_flag_value != CAP_SET)
-      return no_capability;
-
-    if (cap_get_flag(proc_cap, cap, CAP_PERMITTED, &cap_flag_value))
-      PFATAL("Could not get CAP_PERMITTED flag value from process id %d", pid);
-
-    if (cap_flag_value != CAP_SET)
-      return no_capability;
-  }
-
-  return 0;
+  return word < _LINUX_CAPABILITY_U32S_3 &&
+         (data[word].effective & mask) && (data[word].permitted & mask);
 }
 
 #ifndef AFL_LIB
@@ -9275,7 +9282,7 @@ int main(int argc, char** argv) {
   if (!protocol_selected) FATAL("Please specify the protocol to be tested using the -P option");
 
   if (netns_name) {
-    if (check_ep_capability(CAP_SYS_ADMIN, argv[0]) != 0)
+    if (!has_effective_permitted_capability(CAP_SYS_ADMIN))
       FATAL("Could not run the server under test in a \"%s\" network namespace "
             "without CAP_SYS_ADMIN capability.\n You can set it by invoking "
             "afl-fuzz with sudo or by \"$ setcap cap_sys_admin+ep /path/to/afl-fuzz\".", netns_name);

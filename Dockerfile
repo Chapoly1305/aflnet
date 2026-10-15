@@ -6,9 +6,7 @@ RUN apt-get -y update && \
     apt-utils \
     build-essential \
     openssl \
-    clang \
-    graphviz-dev \
-    libcap-dev
+    clang
 
 # Download and compile AFLNet
 ENV LLVM_CONFIG="llvm-config-6.0"
