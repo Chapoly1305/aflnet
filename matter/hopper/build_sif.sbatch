@@ -48,7 +48,11 @@ mkdir -p "${IMAGE_ROOT}"
   die "refusing to overwrite AFLNet image root: ${IMAGE_ROOT}"
 printf '%s  %s\n' "${DOCKER_ARCHIVE_SHA256}" "${DOCKER_ARCHIVE}" | sha256sum -c -
 
-local_parent="${SLURM_TMPDIR:-/tmp}"
+local_parent="${AF_NODE_LOCAL_ROOT:-/run/user/$(id -u)}"
+[[ -d "${local_parent}" && -w "${local_parent}" ]] || \
+  die "AFLNet node-local root is not writable: ${local_parent}"
+[[ "${local_parent}" != /tmp && "${local_parent}" != /tmp/* ]] || \
+  die "refusing to use /tmp for the AFLNet SIF build root"
 local_root="$(mktemp -d "${local_parent}/aflnet-sif-build-${SLURM_JOB_ID}.XXXXXX")"
 cleanup() {
   chmod -R u+w "${local_root}" 2>/dev/null || true

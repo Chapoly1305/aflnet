@@ -103,7 +103,8 @@ for symbol in __llvm_profile_counter_bias __llvm_profile_write_file; do
 done
 
 sha() { sha256sum "$1" | awk '{print $1}'; }
-stage="$(mktemp -d /tmp/aflnet-fuzz-image-XXXXXX)"
+mkdir -p "${REPO_ROOT}/out"
+stage="$(mktemp -d "${REPO_ROOT}/out/aflnet-fuzz-image.XXXXXX")"
 trap 'rm -rf -- "${stage}"' EXIT
 mkdir -p "${stage}/seeds"
 cp "${AFLNET_DIR}/afl-fuzz" "${stage}/afl-fuzz"
